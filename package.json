@@ -1,0 +1,99 @@
+{
+  "name": "coding-agent",
+  "version": "0.1.0",
+  "description": "A lightweight, file-based coding CLI tool that can create, update, and manage file structures for common development tasks with minimal system overhead.",
+  "author": "CodingAgent",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "coding-agent": "./bin/run.js"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "postpack": "shx rm -f oclif.manifest.json",
+    "posttest": "eslint . --ext .ts",
+    "prepack": "shx rm -rf lib && tsc -b && oclif manifest && oclif readme",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "start": "node ./bin/run.js",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.27.0",
+    "@google/generative-ai": "^0.21.0",
+    "@oclif/core": "^4.0.0",
+    "@oclif/plugin-help": "^6.0.0",
+    "@oclif/plugin-plugins": "^5.0.0",
+    "better-sqlite3": "^11.0.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "cosmiconfig": "^9.0.0",
+    "diff": "^5.2.0",
+    "dotenv": "^17.3.1",
+    "glob": "^10.3.0",
+    "ignore": "^5.3.0",
+    "inquirer": "^10.0.0",
+    "js-yaml": "^4.1.0",
+    "marked": "^11.0.0",
+    "marked-terminal": "^6.0.0",
+    "ollama": "^0.5.0",
+    "openai": "^4.52.0",
+    "ora": "^8.0.0",
+    "tiktoken": "^1.0.0",
+    "uuid": "^10.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@oclif/test": "^4.0.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/diff": "^5.2.0",
+    "@types/inquirer": "^9.0.0",
+    "@types/js-yaml": "^4.0.0",
+    "@types/marked-terminal": "^6.1.1",
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^10.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-oclif": "^5.0.0",
+    "eslint-config-oclif-typescript": "^3.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.2.0",
+    "shx": "^0.3.0",
+    "typescript": "^5.4.0",
+    "vitetest": "^2.0.0"
+  },
+  "oclif": {
+    "dirname": "coding-agent",
+    "commands": "./dist/cli/commands",
+    "plugins": [
+      "@oclif/plugin-help",
+      "@oclif/plugin-plugins"
+    ],
+    "topicSeparator": " "
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "/bin",
+    "/dist",
+    "/oclif.manifest.json"
+  ],
+  "keywords": [
+    "cli",
+    "ai",
+    "agent",
+    "coding",
+    "automation",
+    "developer-tools",
+    "lightweight",
+    "file-based"
+  ]
+}
