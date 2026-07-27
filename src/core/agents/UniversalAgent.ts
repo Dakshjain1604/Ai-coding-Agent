@@ -9,6 +9,7 @@ import path from "path";
 import { marked } from "marked";
 import TerminalRenderer from "marked-terminal";
 import { BaseAgent } from "./BaseAgent.js";
+import { TelemetryCollector } from "../../telemetry/TelemetryCollector.js";
 
 marked.setOptions({
   renderer: new TerminalRenderer({
@@ -34,6 +35,8 @@ import { registerBuiltInTools } from "../tools/built-in.js";
 
 export class UniversalAgent extends BaseAgent {
   private currentMode: AgentMode = "code";
+  /** Incrementing counter for turn numbers across the agent's lifetime */
+  private turnCounter: number = 0;
 
   constructor(mode?: AgentMode) {
     super("code", {});
@@ -81,9 +84,23 @@ export class UniversalAgent extends BaseAgent {
     }
     this.setMode(mode);
 
-    const startTime = Date.now();
+    const turnStartWallTime = Date.now();
     let tokensUsed = 0;
     let toolCalls = 0;
+
+    // ---- Telemetry: turn start ----
+    const turnNumber = ++this.turnCounter;
+    const collector = TelemetryCollector.getInstance();
+
+    // Share session/turn context with BaseAgent so callLLM/executeTool inherit it
+    this.telemetrySessionId = collector.getSessionId();
+    this.telemetryTurnNumber = turnNumber;
+
+    try {
+      this.safeRecordTurnStart(collector, turnNumber, mode);
+    } catch {
+      // Telemetry must never crash the agent
+    }
 
     try {
       const context = await this.initializeContext(task);
@@ -117,7 +134,10 @@ export class UniversalAgent extends BaseAgent {
       const maxIterations = this.config.maxIterations;
       let lastOutput = "";
       let consecutiveIdle = 0;
+      let identicalActionCount = 0;
+      let lastToolCallsString = "";
       const EARLY_EXIT_THRESHOLD = 3;
+      const ACTION_CYCLE_LIMIT = 3;
 
       while (iterations < maxIterations) {
         const iterationNum = iterations + 1;
@@ -127,21 +147,64 @@ export class UniversalAgent extends BaseAgent {
           spinner: "dots",
         }).start();
 
-        const stream = await this.callLLM({ systemPrompt, stream: false });
+        let compResult: import("../../providers/ProviderInterface.js").CompletionResult | null = null;
+        let retries = 0;
+        const maxRetries = 3;
+        let hasFallenBack = false;
+        
+        while (retries < maxRetries) {
+          try {
+            const stream = await this.callLLM({ systemPrompt, stream: false });
+            compResult = stream as import("../../providers/ProviderInterface.js").CompletionResult;
+            break;
+          } catch (err) {
+            retries++;
+            
+            if (retries >= maxRetries && !hasFallenBack) {
+              hasFallenBack = true;
+              try {
+                console.log(chalk.yellow(`\nAll retries failed for ${context.provider.getType()}. Attempting dynamic fallback...`));
+                const router = new (await import("../../providers/ModelRouter.js")).ModelRouter();
+                const tokens = this.estimateTokenCount(context.messages);
+                const routing = await router.route("complex", tokens);
+                context.provider = routing.provider;
+                context.model = routing.model;
+                console.log(chalk.green(`Switched to ${context.provider.getType()}/${context.model}. Retrying...`));
+                retries = 0;
+                continue;
+              } catch(fallbackErr) {
+                // If fallback fails, throw original error
+              }
+            }
+            
+            if (retries >= maxRetries) throw err;
+            
+            const delayMs = Math.pow(2, retries) * 1000;
+            console.log(
+              chalk.yellow(
+                `LLM call encountered an error. Retrying in ${delayMs}ms... (Attempt ${retries}/${maxRetries})`,
+              ),
+            );
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+          }
+        }
 
         llmSpinner.stop();
+
+        if (!compResult) {
+          throw new Error("Failed to receive LLM response after retries.");
+        }
 
         let content = "";
         let tokens = 0;
 
-        const compResult = stream as import("../../providers/ProviderInterface.js").CompletionResult;
         content = compResult.content;
         tokens = compResult.usage?.totalTokens || 0;
 
         // Strip out tool calls and stray XML for clean display
         const displayContent = content
-          .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
-          .replace(/<\/?[\w\s="'-]+>/gi, '') // aggressive fallback for broken tags
+          .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "")
+          .replace(/<\/?[\w\s="'-]+>/gi, "") // aggressive fallback for broken tags
           .trim();
 
         if (displayContent) {
@@ -157,7 +220,28 @@ export class UniversalAgent extends BaseAgent {
 
         const result = { content };
 
-        const toolCallsInOutput = this.parseToolCalls(result.content);
+        // Prefer native tool calls, fallback to text parser if empty
+        let toolCallsInOutput: Array<{ name: string; params: Record<string, unknown> }> = [];
+        if (compResult.toolCalls && compResult.toolCalls.length > 0) {
+          toolCallsInOutput = compResult.toolCalls;
+        } else {
+          toolCallsInOutput = this.parseToolCalls(result.content);
+        }
+
+        // --- Action Cycle Detector ---
+        const currentToolCallsString = JSON.stringify(toolCallsInOutput);
+        if (toolCallsInOutput.length > 0 && currentToolCallsString === lastToolCallsString) {
+          identicalActionCount++;
+          if (identicalActionCount >= ACTION_CYCLE_LIMIT) {
+             console.log(chalk.red(`\nAction Cycle Detected (${ACTION_CYCLE_LIMIT} identical actions). Injecting intervention...`));
+             this.addMessage("system", "ACTION CYCLE DETECTED: You have attempted the exact same tool calls multiple times without progressing. You MUST rethink your approach, try a different file, or change your methodology completely. Do not repeat the same action.");
+             identicalActionCount = 0; // reset
+          }
+        } else {
+          identicalActionCount = 0;
+          lastToolCallsString = currentToolCallsString;
+        }
+
         toolCalls += toolCallsInOutput.length;
 
         if (toolCallsInOutput.length === 0) {
@@ -176,6 +260,9 @@ export class UniversalAgent extends BaseAgent {
           break;
         }
 
+        let consecutiveToolErrors = 0;
+        const MAX_CONSECUTIVE_TOOL_ERRORS = 5;
+
         const toolResults: string[] = [];
         for (const { name, params } of toolCallsInOutput) {
           const toolSpinner = ora({
@@ -184,16 +271,34 @@ export class UniversalAgent extends BaseAgent {
           }).start();
 
           try {
-            const result = await this.executeTool(name, params);
+            const res = await this.executeTool(name, params);
             toolSpinner.succeed(this.getToolSuccessDescription(name, params));
-            toolResults.push(this.formatToolResult(name, result));
+            let formatted = this.formatToolResult(name, res);
+            const MAX_RESULT_CHARS = 16000;
+            if (formatted.length > MAX_RESULT_CHARS) {
+              formatted =
+                formatted.slice(0, MAX_RESULT_CHARS) +
+                `\n...[Output truncated to prevent RAM bloat (${formatted.length} total chars)]`;
+            }
+            toolResults.push(formatted);
+            consecutiveToolErrors = 0;
           } catch (error) {
-            toolSpinner.fail(
-              `Error: ${error instanceof Error ? error.message : "Unknown error"}`,
-            );
+            consecutiveToolErrors++;
+            const errMsg =
+              error instanceof Error ? error.message : "Unknown error";
+            toolSpinner.fail(`Error: ${errMsg}`);
             toolResults.push(
-              `Error executing ${name}: ${error instanceof Error ? error.message : "Unknown error"}`,
+              `Tool execution failed for '${name}' with parameters ${JSON.stringify(params)}.\nError details: ${errMsg}\nPlease analyze the error, correct your parameters or approach, and try again.`,
             );
+
+            if (consecutiveToolErrors >= MAX_CONSECUTIVE_TOOL_ERRORS) {
+              console.log(
+                chalk.red(
+                  `Exceeded maximum consecutive tool execution failures (${MAX_CONSECUTIVE_TOOL_ERRORS}). Aborting tool loop to prevent infinite loop.`,
+                ),
+              );
+              break;
+            }
           }
         }
 
@@ -214,11 +319,16 @@ export class UniversalAgent extends BaseAgent {
         "universal",
         task.description,
         lastOutput,
-        Date.now() - startTime,
+        Date.now() - turnStartWallTime,
         { tokensUsed, toolCalls, iterations, mode: this.currentMode },
       );
 
-      return this.complete(true, lastOutput);
+      const taskResult = this.complete(true, lastOutput);
+
+      // ---- Telemetry: turn end (success) ----
+      this.finalizeTurn(collector, turnNumber, mode);
+
+      return taskResult;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
@@ -231,7 +341,59 @@ export class UniversalAgent extends BaseAgent {
       }
       console.log(chalk.red("  └──────────────────────────────────\n"));
 
+      // ---- Telemetry: turn end (error) ----
+      this.finalizeTurn(collector, turnNumber, mode);
+
       return this.complete(false, `Task failed: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Safely record turn_start telemetry event.
+   */
+  private safeRecordTurnStart(
+    collector: TelemetryCollector,
+    turnNumber: number,
+    mode: string,
+  ): void {
+    try {
+      collector.recordTurnStart(
+        collector.getSessionId(),
+        turnNumber,
+        mode,
+      );
+    } catch {
+      // Telemetry must never crash the agent
+    }
+  }
+
+  /**
+   * Finalize a turn: build summary, print to console, record turn_end.
+   * All wrapped in try/catch for graceful degradation.
+   */
+  private finalizeTurn(
+    collector: TelemetryCollector,
+    turnNumber: number,
+    mode: string,
+  ): void {
+    try {
+      const summary = collector.buildSummary(turnNumber);
+
+      // Print human-readable summary to console
+      collector.printSummary(summary, turnNumber);
+
+      // Record turn_end event
+      const turnDurationMs = this.state?.startTime
+        ? Date.now() - this.state.startTime.getTime()
+        : 0;
+      collector.recordTurnEnd(
+        collector.getSessionId(),
+        turnNumber,
+        turnDurationMs,
+        summary,
+      );
+    } catch {
+      // Telemetry must never crash the agent
     }
   }
 

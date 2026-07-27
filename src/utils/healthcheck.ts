@@ -29,7 +29,7 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
   const config = getConfigManager().get();
   const factory = getProviderFactory({
     preferLocal: true,
-    fallbackToPaid: false,
+    fallbackToPaid: true,
   });
 
   const checks: HealthCheckResult[] = [];
@@ -59,7 +59,7 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
     }
   }
 
-  // Check OpenAI if enabled
+  // Check OpenAI if enabled (or Nvidia)
   const openaiEnabled = config.providers.find(
     (p: ProviderConfig) => p.type === "openai",
   )?.enabled;
@@ -67,7 +67,7 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
     const openaiCheck = await checkCloudProvider(
       factory,
       "openai",
-      "OPENAI_API_KEY",
+      "OPENAI_API_KEY / NVIDIA_API_KEY",
     );
     checks.push(openaiCheck);
     if (

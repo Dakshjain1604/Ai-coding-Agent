@@ -255,15 +255,8 @@ export class MemoryManager {
       metadata,
     };
 
-    // Store turn (it's associated with the conversation)
-    const conversation = this.sqliteStore.getConversation(conversationId);
-    if (conversation) {
-      conversation.turns.push(turn);
-      this.sqliteStore.storeConversation({
-        ...conversation,
-        turns: conversation.turns,
-      });
-    }
+    // Store turn directly to database without reloading/reinserting full conversation
+    this.sqliteStore.storeTurn(conversationId, turn);
 
     return turn;
   }

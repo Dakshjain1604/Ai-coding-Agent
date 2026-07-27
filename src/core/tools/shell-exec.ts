@@ -41,6 +41,17 @@ export function createShellTools(): ToolDefinition[] {
       handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
         try {
           const command = params.command as string;
+
+          // Security Guardrail: Block potentially destructive commands
+          const DANGEROUS_COMMANDS = /^(?:rm\s+-rf|sudo|chmod\s+-R|chown\s+-R|mkfs|dd)\b|\|\s*(?:bash|sh|zsh)/i;
+          if (DANGEROUS_COMMANDS.test(command.trim())) {
+            return {
+              success: false,
+              output: `Security Guardrail: Command blocked because it contains potentially destructive patterns: '${command}'`,
+              metadata: { blocked: true }
+            };
+          }
+
           const cwd = params.cwd as string | undefined;
           const timeout = (params.timeout as number) ?? 30000;
           const env = params.env as Record<string, string> | undefined;

@@ -224,7 +224,7 @@ export class TaskAnalyzer {
           maxParallel: 1,
         };
 
-      case 'complex':
+      case 'complex': {
         // Check for parallel-friendly tasks
         const parallelAgents = this.identifyParallelAgents(description);
         if (parallelAgents.length > 1) {
@@ -240,6 +240,7 @@ export class TaskAnalyzer {
           agents: ['orchestrator', 'plan', 'code', 'test', 'review'],
           maxParallel: 3,
         };
+      }
     }
   }
 

@@ -578,7 +578,7 @@ export class SQLiteStore {
   // Private Methods
   // ============================================================================
 
-  private storeTurn(conversationId: string, turn: ConversationTurn): void {
+  storeTurn(conversationId: string, turn: ConversationTurn): void {
     this.db.prepare(`
       INSERT INTO conversation_turns (id, conversation_id, role, content, timestamp, metadata)
       VALUES (?, ?, ?, ?, ?, ?)

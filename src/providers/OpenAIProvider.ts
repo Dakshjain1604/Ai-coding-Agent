@@ -31,23 +31,40 @@ export class OpenAIProvider extends BaseProvider {
   constructor(config?: OpenAIConfig) {
     super("openai", config);
 
-    const apiKey = config?.apiKey ?? process.env.OPENAI_API_KEY;
+    const isNvidia =
+      !config?.apiKey &&
+      !process.env.OPENAI_API_KEY &&
+      (Boolean(process.env.NVIDIA_API_KEY) || Boolean(process.env.NVAPI_KEY));
+
+    const apiKey =
+      config?.apiKey ??
+      process.env.OPENAI_API_KEY ??
+      process.env.NVIDIA_API_KEY ??
+      process.env.NVAPI_KEY;
+
     if (!apiKey) {
-      throw new ProviderError("OpenAI API key not provided", "openai", {
-        hint: "Set OPENAI_API_KEY environment variable",
+      throw new ProviderError("API key not provided", "openai", {
+        hint: "Set OPENAI_API_KEY or NVIDIA_API_KEY environment variable",
       });
     }
 
+    const baseURL =
+      config?.baseUrl ??
+      (isNvidia ? "https://integrate.api.nvidia.com/v1" : undefined);
+
     this.client = new OpenAI({
       apiKey,
-      baseURL: config?.baseUrl,
+      baseURL,
       organization: config?.organization,
     });
 
-    this.defaultModel = config?.defaultModel ?? "gpt-4o";
+    this.defaultModel =
+      config?.defaultModel ??
+      (isNvidia ? "meta/llama-3.3-70b-instruct" : "gpt-4o");
   }
 
   async isAvailable(): Promise<boolean> {
+    if (this.client.apiKey) return true;
     try {
       await this.client.models.list();
       return true;
@@ -85,6 +102,16 @@ export class OpenAIProvider extends BaseProvider {
     this.logger.providerCall("openai", model);
 
     try {
+      const isNvidia = this.client.baseURL.includes("nvidia");
+      const openAiTools = !isNvidia ? options?.tools?.map((t) => ({
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      })) : undefined;
+
       const response = await this.client.chat.completions.create({
         model,
         max_tokens: maxTokens,
@@ -92,12 +119,27 @@ export class OpenAIProvider extends BaseProvider {
         temperature: options?.temperature,
         top_p: options?.topP,
         stop: options?.stopSequences,
+        tools: openAiTools && openAiTools.length > 0 ? openAiTools : undefined,
       });
 
       const choice = response.choices[0];
       if (!choice) {
         throw new ProviderError("No completion choice returned", "openai");
       }
+
+      const toolCalls = choice.message.tool_calls?.map((tc) => {
+        let params: Record<string, unknown> = {};
+        try {
+          params = JSON.parse(tc.function.arguments);
+        } catch {
+          params = {};
+        }
+        return {
+          id: tc.id,
+          name: tc.function.name,
+          params,
+        };
+      });
 
       return {
         content: choice.message.content ?? "",
@@ -108,6 +150,7 @@ export class OpenAIProvider extends BaseProvider {
         },
         model: response.model,
         finishReason: this.mapFinishReason(choice.finish_reason),
+        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
       };
     } catch (error) {
       throw new ProviderError(
@@ -247,9 +290,10 @@ export class OpenAIProvider extends BaseProvider {
 
   private mapFinishReason(
     reason: string | null | undefined,
-  ): "stop" | "length" | "error" {
+  ): "stop" | "length" | "error" | "tool_calls" {
     if (reason === "stop") return "stop";
     if (reason === "length") return "length";
+    if (reason === "tool_calls") return "tool_calls";
     return "error";
   }
 }

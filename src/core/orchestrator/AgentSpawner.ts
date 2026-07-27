@@ -141,7 +141,7 @@ export class AgentSpawner {
         }
         break;
 
-      case "parallel":
+      case "parallel": {
         // Parallel execution with limit
         const agentsToSpawn = strategy.agents.slice(0, strategy.maxParallel);
         const spawnPromises = agentsToSpawn.map((type) =>
@@ -149,6 +149,7 @@ export class AgentSpawner {
         );
         results.push(...(await Promise.all(spawnPromises)));
         break;
+      }
     }
 
     return results;

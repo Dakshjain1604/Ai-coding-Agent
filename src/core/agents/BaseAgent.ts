@@ -12,6 +12,7 @@ import type {
   AgentType,
   AgentConfig,
   AgentState,
+  ToolSchema,
 } from "../../utils/types.js";
 import type {
   ChatMessage,
@@ -24,6 +25,7 @@ import { getModelRouter } from "../../providers/ModelRouter.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
 import type { MemoryManager } from "../../memory/MemoryManager.js";
 import { parseToolCalls } from "./tool-parser.js";
+import { TelemetryCollector } from "../../telemetry/TelemetryCollector.js";
 
 export interface AgentTool {
   name: string;
@@ -67,9 +69,13 @@ export abstract class BaseAgent {
   protected context: AgentContext | null = null;
   protected toolCallCount = 0;
   protected totalCost = 0;
+  /** Session ID for telemetry events (set by UniversalAgent or inherited) */
+  protected telemetrySessionId?: string;
+  /** Current turn number for telemetry (set by UniversalAgent turn tracking) */
+  protected telemetryTurnNumber?: number;
 
   constructor(type: AgentType, config: Partial<AgentConfig>) {
-    this.id = uuid();
+    this.id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     this.type = type;
     this.config = this.getDefaultConfig(type, config);
     this.state = {
@@ -77,6 +83,24 @@ export abstract class BaseAgent {
       type: this.type,
       status: "idle",
     };
+  }
+
+  public getToolSchemas(): ToolSchema[] {
+    const schemas: ToolSchema[] = [];
+    for (const tool of this.tools.values()) {
+      const props = (tool.parameters.properties as Record<string, unknown>) || tool.parameters;
+      const req = (tool.parameters.required as string[]) || [];
+      schemas.push({
+        name: tool.name,
+        description: tool.description,
+        parameters: {
+          type: "object",
+          properties: props,
+          required: req,
+        },
+      });
+    }
+    return schemas;
   }
 
   /**
@@ -220,10 +244,12 @@ export abstract class BaseAgent {
 
   /**
    * Call the LLM with current context
+   * Instrumented with telemetry: records timing, token usage, and provider info.
    */
   protected async callLLM(options?: {
     systemPrompt?: string;
     stream?: boolean;
+    tools?: ToolSchema[];
   }): Promise<CompletionResult | AsyncIterable<StreamChunk>> {
     if (!this.context) {
       throw new Error("Context not initialized");
@@ -243,17 +269,154 @@ export abstract class BaseAgent {
       this.config.maxTokens,
     );
 
+    const toolsToSend = options?.tools ?? this.getToolSchemas();
+
     if (options?.stream) {
-      return provider.stream(truncatedMessages, {
+      // ---- Telemetry-instrumented streaming call ----
+      const streamStartTime = Date.now();
+      const originalStream = provider.stream(truncatedMessages, {
         model,
         maxTokens: this.config.maxTokens,
+        tools: toolsToSend.length > 0 ? toolsToSend : undefined,
       });
+
+      // Wrap the stream to measure time-to-first-token and collect content
+      // Capture method references (avoids 'this' aliasing lint error)
+      const safeRecord = this.safeRecordLLMCall.bind(this);
+      const debugLog = this.logger.debug.bind(this.logger);
+
+      const measuredStream = async function* (): AsyncIterable<StreamChunk> {
+        let firstToken = true;
+        let collectedContent = '';
+        let firstTokenTime = streamStartTime;
+
+        for await (const chunk of originalStream) {
+          if (firstToken) {
+            firstTokenTime = Date.now();
+            const timeToFirstToken = firstTokenTime - streamStartTime;
+            firstToken = false;
+
+            // Log time-to-first-token for observability
+            debugLog(
+              `[telemetry] Time to first token: ${timeToFirstToken}ms (${provider.getType()}/${model})`,
+            );
+          }
+
+          collectedContent += chunk.content;
+          yield chunk;
+        }
+
+        // After stream completes, record LLM call telemetry
+        const streamDurationMs = Date.now() - streamStartTime;
+        const inputText = truncatedMessages.map((m) => m.content).join('\n');
+        const estimatedInput = Math.ceil(inputText.length / 4);
+        const estimatedOutput = Math.ceil(collectedContent.length / 4);
+
+        safeRecord(
+          provider.getType(),
+          model,
+          estimatedInput + estimatedOutput,
+          estimatedInput,
+          estimatedOutput,
+          streamDurationMs,
+          { content: collectedContent, usage: { inputTokens: estimatedInput, outputTokens: estimatedOutput, totalTokens: estimatedInput + estimatedOutput }, model, finishReason: 'stop' },
+        );
+      };
+
+      return measuredStream();
     }
 
-    return provider.complete(truncatedMessages, {
+    // ---- Telemetry-instrumented non-streaming call ----
+    const startTime = Date.now();
+    const result = await provider.complete(truncatedMessages, {
       model,
       maxTokens: this.config.maxTokens,
+      tools: toolsToSend.length > 0 ? toolsToSend : undefined,
     });
+    const durationMs = Date.now() - startTime;
+
+    // Record telemetry event
+    this.safeRecordLLMCall(
+      provider.getType(),
+      model,
+      result.usage?.totalTokens ?? 0,
+      result.usage?.inputTokens ?? 0,
+      result.usage?.outputTokens ?? 0,
+      durationMs,
+      result,
+    );
+
+    return result;
+  }
+
+  /**
+   * Safely record an LLM call telemetry event.
+   * Falls back to countTokens() estimate if usage data is missing (zero tokens).
+   */
+  private safeRecordLLMCall(
+    providerType: string,
+    model: string,
+    totalTokens: number,
+    inputTokens: number,
+    outputTokens: number,
+    durationMs: number,
+    result: CompletionResult,
+  ): void {
+    try {
+      const collector = TelemetryCollector.getInstance();
+      if (!collector.isEnabled()) return;
+
+      // If usage data is missing (zero total), fall back to estimate
+      let finalInput = inputTokens;
+      let finalOutput = outputTokens;
+      let finalTotal = totalTokens;
+
+      if (finalTotal === 0 && this.context) {
+        // Estimate: use the provider's countTokens or the rough estimate
+        try {
+          finalInput = this.context.provider.countTokens(
+            this.context.messages.map((m) => m.content).join('\n'),
+          );
+          finalOutput = this.estimateTokenCount([
+            { role: 'assistant', content: result.content },
+          ]);
+          finalTotal = finalInput + finalOutput;
+        } catch {
+          // Fall back to length-based estimate
+          finalInput = Math.ceil(
+            this.context.messages.map((m) => this.extractTextContent(m.content)).join('\n').length / 4,
+          );
+          finalOutput = Math.ceil(result.content.length / 4);
+          finalTotal = finalInput + finalOutput;
+        }
+      }
+
+      // Compute estimated cost from provider
+      let cost = 0;
+      try {
+        if (this.context) {
+          cost = this.context.provider.estimateCost(finalInput, finalOutput, model);
+        }
+      } catch {
+        // Cost estimation failure must never crash the agent
+      }
+
+      collector.recordLLMCall(
+        this.telemetrySessionId || collector.getSessionId(),
+        this.telemetryTurnNumber || 1,
+        providerType,
+        model,
+        {
+          promptTokens: finalInput,
+          completionTokens: finalOutput,
+          totalTokens: finalTotal,
+        },
+        durationMs,
+        cost,
+      );
+    } catch {
+      // Telemetry failure must NEVER crash the agent
+    }
   }
 
   protected truncateMessages(
@@ -261,14 +424,25 @@ export abstract class BaseAgent {
     maxTokens: number,
   ): ChatMessage[] {
     const estimatedTokens = this.estimateTokenCount(messages);
-    if (estimatedTokens <= maxTokens) return messages;
+    const COMPACTION_THRESHOLD = 0.70; // Proactive compaction at 70% capacity
+    const effectiveLimit = Math.floor(maxTokens * COMPACTION_THRESHOLD);
+
+    // If under 70%, no compaction needed
+    if (estimatedTokens <= effectiveLimit) return messages;
+
+    const percentage = Math.round((estimatedTokens / maxTokens) * 100);
+    this.logger.warn(
+      `Context usage reached ${percentage}% (${estimatedTokens}/${maxTokens} tokens). Compacting context to 50% capacity...`,
+    );
 
     const systemMessages = messages.filter((m) => m.role === "system");
     const firstUserMsg = messages.find((m) => m.role === "user");
     const nonSystemMessages = messages.filter((m) => m.role !== "system");
 
-    const systemBudget = Math.floor(maxTokens * 0.2);
-    const conversationBudget = maxTokens - systemBudget;
+    // Reduce to 50% target size when compacting
+    const targetBudget = Math.floor(maxTokens * 0.50);
+    const systemBudget = Math.floor(targetBudget * 0.2);
+    const conversationBudget = targetBudget - systemBudget;
 
     const recent: ChatMessage[] = [];
     let tokenCount = 0;
@@ -289,16 +463,30 @@ export abstract class BaseAgent {
     return [...systemMessages, ...pinned];
   }
 
+  private extractTextContent(
+    content: string | import("../../providers/ProviderInterface.js").ContentBlock[],
+  ): string {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((block) => (block.type === "text" ? block.text ?? "" : ""))
+        .join("\n");
+    }
+    return "";
+  }
+
   protected estimateTokenCount(messages: ChatMessage[]): number {
     let total = 0;
     for (const msg of messages) {
-      total += Math.ceil(msg.content.length / 4);
+      const text = this.extractTextContent(msg.content);
+      total += Math.ceil(text.length / 4);
     }
     return total;
   }
 
   /**
    * Execute a tool
+   * Instrumented with telemetry: records timing, tool name/args, and success/error.
    */
   protected async executeTool(
     name: string,
@@ -339,10 +527,92 @@ export abstract class BaseAgent {
       );
     }
 
-    const result = await tool.execute(params);
-    this.toolCallCount++;
-    this.context?.toolResults.set(`${name}_${Date.now()}`, result);
-    return result;
+    // ---- Telemetry: record start time ----
+    const toolStartTime = Date.now();
+    let toolSuccess = true;
+    let toolError: string | undefined;
+
+    try {
+      const result = await tool.execute(params);
+      this.toolCallCount++;
+      this.context?.toolResults.set(`${name}_${Date.now()}`, result);
+      return result;
+    } catch (err) {
+      toolSuccess = false;
+      toolError = err instanceof Error ? err.message : String(err);
+      throw err; // Re-throw — caller handles the error
+    } finally {
+      // Always record telemetry (even on error)
+      this.safeRecordToolCall(name, params, toolStartTime, toolSuccess, toolError);
+    }
+  }
+
+  /**
+   * Safely record a tool call telemetry event.
+   * Redacts secrets: truncates command strings > 200 chars, strips file contents.
+   */
+  private safeRecordToolCall(
+    name: string,
+    params: Record<string, unknown>,
+    startTime: number,
+    success: boolean,
+    error?: string,
+  ): void {
+    try {
+      const collector = TelemetryCollector.getInstance();
+      if (!collector.isEnabled()) return;
+
+      const durationMs = Date.now() - startTime;
+
+      // Redact sensitive params
+      const redactedArgs = this.redactToolArgs(name, params);
+
+      collector.recordToolCall(
+        this.telemetrySessionId || collector.getSessionId(),
+        this.telemetryTurnNumber || 1,
+        name,
+        redactedArgs,
+        success,
+        durationMs,
+        error,
+      );
+    } catch {
+      // Telemetry failure must NEVER crash the agent
+    }
+  }
+
+  /**
+   * Redact potentially sensitive data from tool arguments.
+   * - Truncate command strings > 200 chars
+   * - Strip file contents from file_write/file_read params
+   */
+  private redactToolArgs(
+    name: string,
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const redacted: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(params)) {
+      // Truncate string values that are too long
+      if (typeof value === 'string') {
+        if (key === 'command' || key === 'cmd') {
+          redacted[key] = value.length > 200
+            ? value.substring(0, 197) + '...'
+            : value;
+        } else if ((key === 'content' || key === 'data') && value.length > 500) {
+          redacted[key] = value.substring(0, 497) + '...';
+        } else {
+          redacted[key] = value;
+        }
+      } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        // Recursively redact nested objects
+        redacted[key] = this.redactToolArgs(name, value as Record<string, unknown>);
+      } else {
+        redacted[key] = value;
+      }
+    }
+
+    return redacted;
   }
 
   /**

@@ -36,7 +36,7 @@ export class ContextWindowManager {
   constructor(config?: Partial<ContextWindowConfig>) {
     this.config = {
       maxSize: 100000, // 100k tokens default
-      compactionThreshold: 0.8, // Compact at 80% capacity
+      compactionThreshold: 0.7, // Compact at 70% capacity
       reservedTokens: 10000, // Reserve 10k tokens for system
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
       ...config,

@@ -21,7 +21,17 @@ import { CodingAgentError } from "./types.js";
 // ============================================================================
 
 const ProviderConfigSchema = z.object({
-  type: z.enum(["ollama", "claude", "openai", "gemini", "local"]),
+  type: z.enum([
+    "ollama",
+    "claude",
+    "openai",
+    "gemini",
+    "local",
+    "groq",
+    "openrouter",
+    "huggingface",
+    "ollama-cloud",
+  ]),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
   models: z
@@ -224,6 +234,31 @@ export class ConfigManager {
             code: "qwen2.5-coder:latest",
             complex: "qwen2.5-coder:latest",
           },
+          enabled: true,
+        },
+        {
+          type: "openai",
+          models: {},
+          enabled: true,
+        },
+        {
+          type: "claude",
+          models: {},
+          enabled: true,
+        },
+        {
+          type: "gemini",
+          models: {},
+          enabled: true,
+        },
+        {
+          type: "groq",
+          models: {},
+          enabled: true,
+        },
+        {
+          type: "openrouter",
+          models: {},
           enabled: true,
         },
       ],

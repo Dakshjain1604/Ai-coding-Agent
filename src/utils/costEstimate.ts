@@ -75,10 +75,10 @@ export function estimateTaskCost(
     const cost = (totalTokens / 1_000_000) * modelCost;
 
     // Worst case: max iterations * tokens per iteration
+    const agentConfig = config.agents[agentType as keyof typeof config.agents];
     const maxTokens =
       baseTokenCount +
-      config.agents[agentType as keyof typeof config.agents]?.maxIterations! *
-        1000;
+      (agentConfig?.maxIterations ?? iterations) * 1000;
     const worstCase = (maxTokens / 1_000_000) * modelCost;
 
     estimates.push({

@@ -45,9 +45,10 @@ export default class RunCommand extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(RunCommand);
 
-    // Validate providers are available
-    await validateProviders();
-    this.logger.setLevel("error"); // Hide verbose INFO logs like "Spawning agent..."
+    if (flags["no-confirm"]) {
+      const { getPermissionSystem } = await import("../../utils/permission-system.js");
+      getPermissionSystem().allowAll();
+    }
 
     // Create task
     const task: Task = {

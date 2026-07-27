@@ -59,6 +59,11 @@ export class PermissionSystem {
         level: "allow",
         description: "Directory operations",
       },
+      {
+        pattern: /^workspace_/,
+        level: "allow",
+        description: "Workspace verification operations",
+      },
     ];
   }
 
@@ -188,6 +193,12 @@ export class PermissionSystem {
 
     console.log(chalk.red("  ✖ Operation denied\n"));
     return false;
+  }
+
+  allowAll(): void {
+    for (const rule of this.rules) {
+      rule.level = "allow";
+    }
   }
 
   addRule(pattern: string, level: PermissionLevel, description: string): void {

@@ -6,6 +6,7 @@
 import { getLogger } from "../../utils/logger.js";
 import type { AgentTool } from "../agents/BaseAgent.js";
 import type { ToolResult } from "../../utils/types.js";
+import { TOOL_SETS } from "../agents/tool-sets.js";
 
 export interface ToolDefinition {
   name: string;
@@ -137,6 +138,9 @@ export class ToolRegistry {
       parameters: tool.parameters,
       execute: async (params: Record<string, unknown>) => {
         const result = await this.execute(tool.name, params);
+        if (!result.success) {
+          throw new Error(result.output || `Tool ${tool.name} failed execution.`);
+        }
         return result;
       },
     };
@@ -146,32 +150,9 @@ export class ToolRegistry {
    * Get tools for a specific agent type
    */
   getToolsForAgent(agentType: string): ToolDefinition[] {
-    // Default tool sets for different agent types
-    const toolSets: Record<string, string[]> = {
-      orchestrator: [
-        "planning",
-        "file_read",
-        "file_write",
-        "git_status",
-        "memory_store",
-        "memory_retrieve",
-      ],
-      plan: ["file_read", "git_status", "git_log", "memory_retrieve"],
-      code: [
-        "file_read",
-        "file_write",
-        "file_delete",
-        "shell_exec",
-        "git_status",
-        "git_add",
-        "git_commit",
-      ],
-      test: ["file_read", "file_write", "test_run", "coverage_report"],
-      debug: ["file_read", "shell_exec", "logs_read", "process_list"],
-      review: ["file_read", "diff_generate", "linter_run", "memory_retrieve"],
-    };
-
-    const allowedTools = toolSets[agentType] ?? [];
+    const allowedTools =
+      TOOL_SETS[agentType as keyof typeof TOOL_SETS] ??
+      TOOL_SETS.code;
     return this.getAll().filter((tool) => allowedTools.includes(tool.name));
   }
 

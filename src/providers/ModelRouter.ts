@@ -380,7 +380,7 @@ export class ModelRouter {
       "claude",
     ];
 
-    let lastFailReason = "";
+    const lastFailReason = "";
 
     for (const providerType of fallbackOrder) {
       try {
@@ -445,10 +445,30 @@ export class ModelRouter {
         embedding: "claude-haiku-4-5-20251001", // Claude doesn't have embeddings
       },
       openai: {
-        simple: "gpt-4o-mini",
-        code: "gpt-4o",
-        complex: "o1-preview",
-        reasoning: "o1-preview",
+        simple:
+          !process.env.OPENAI_API_KEY &&
+          (Boolean(process.env.NVIDIA_API_KEY) ||
+            Boolean(process.env.NVAPI_KEY))
+            ? "meta/llama-3.1-8b-instruct"
+            : "gpt-4o-mini",
+        code:
+          !process.env.OPENAI_API_KEY &&
+          (Boolean(process.env.NVIDIA_API_KEY) ||
+            Boolean(process.env.NVAPI_KEY))
+            ? "meta/llama-3.1-8b-instruct"
+            : "gpt-4o",
+        complex:
+          !process.env.OPENAI_API_KEY &&
+          (Boolean(process.env.NVIDIA_API_KEY) ||
+            Boolean(process.env.NVAPI_KEY))
+            ? "meta/llama-3.1-8b-instruct"
+            : "o1-preview",
+        reasoning:
+          !process.env.OPENAI_API_KEY &&
+          (Boolean(process.env.NVIDIA_API_KEY) ||
+            Boolean(process.env.NVAPI_KEY))
+            ? "meta/llama-3.1-8b-instruct"
+            : "o1-preview",
         embedding: "text-embedding-3-small",
       },
       gemini: {

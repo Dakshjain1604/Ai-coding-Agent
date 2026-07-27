@@ -121,7 +121,28 @@ export const fileWrite: ToolDefinition = {
       }
 
       writeFileSync(path, finalContent, "utf-8");
-      return { success: true, output: `File written: ${path}` };
+
+      // Auto-format post write
+      try {
+        const { formatFile } = await import("../../utils/formatter.js");
+        await formatFile(path);
+      } catch {
+        // Formatter is optional
+      }
+
+      // Check dependent files via AST dependency graph
+      let depMsg = "";
+      try {
+        const { getDependencyGraph } = await import("../../utils/dependency-graph.js");
+        const dependents = getDependencyGraph().getDependentFiles(path);
+        if (dependents.length > 0) {
+          depMsg = ` (Dependent files flagged for audit: ${dependents.map((f) => basename(f)).join(", ")})`;
+        }
+      } catch {
+        // Dependency graph check is optional
+      }
+
+      return { success: true, output: `File written: ${path}${depMsg}` };
     } catch (error) {
       return {
         success: false,
@@ -625,6 +646,77 @@ export const testRun: ToolDefinition = {
   },
 };
 
+export const workspaceVerify: ToolDefinition = {
+  name: "workspace_verify",
+  description:
+    "Verify workspace integrity across ALL files: runs TypeScript type-checking (tsc -p .) and unit tests to ensure no broken dependencies or imports exist across the codebase.",
+  parameters: {
+    cwd: {
+      type: "string",
+      description: "Working directory for workspace verification",
+      required: false,
+    },
+    runTests: {
+      type: "boolean",
+      description: "Whether to run test suite alongside typechecking",
+      required: false,
+      default: true,
+    },
+  },
+  handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+    const cwd = (params.cwd as string) ?? (params.path as string) ?? process.cwd();
+    const runTests = (params.runTests as boolean) ?? true;
+    const logs: string[] = [];
+    let overallSuccess = true;
+
+    // 1. TypeScript compilation check
+    if (existsSync(join(cwd, "tsconfig.json"))) {
+      try {
+        await execAsync("npx tsc -p . --noEmit", { cwd, timeout: 60000 });
+        logs.push("✔ TypeScript compilation check: PASSED (0 errors)");
+      } catch (error) {
+        overallSuccess = false;
+        const err = error as { stdout?: string; stderr?: string };
+        logs.push(`✖ TypeScript compilation check: FAILED\n${err.stdout || err.stderr || String(error)}`);
+      }
+    }
+
+    // 2. Unit tests check
+    if (runTests && existsSync(join(cwd, "package.json"))) {
+      try {
+        await execAsync("npm test", { cwd, timeout: 120000 });
+        logs.push("✔ Test suite check: PASSED");
+      } catch (error) {
+        overallSuccess = false;
+        const err = error as { stdout?: string; stderr?: string };
+        logs.push(`✖ Test suite check: FAILED\n${err.stdout || err.stderr || String(error)}`);
+      }
+    }
+
+    const resultPayload = {
+      status: overallSuccess ? "success" : "failed",
+      tool: "workspace_verify",
+      compilation: existsSync(join(cwd, "tsconfig.json"))
+        ? overallSuccess
+          ? "PASSED (0 errors)"
+          : "FAILED"
+        : "SKIPPED (no tsconfig.json)",
+      tests: runTests && existsSync(join(cwd, "package.json"))
+        ? overallSuccess
+          ? "PASSED"
+          : "FAILED"
+        : "SKIPPED",
+      details: logs,
+    };
+
+    return {
+      success: overallSuccess,
+      output: JSON.stringify(resultPayload, null, 2),
+      metadata: resultPayload,
+    };
+  },
+};
+
 // ============================================================================
 // Tool Registration
 // ============================================================================
@@ -655,6 +747,7 @@ export function registerBuiltinTools(
   registry.register(memoryStore);
   registry.register(memoryRetrieve);
 
-  // Test tools
+  // Test & Verification tools
   registry.register(testRun);
+  registry.register(workspaceVerify);
 }

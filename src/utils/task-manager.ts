@@ -2,7 +2,7 @@
  * Task Manager - Handles task lifecycle, IDs, and output directories
  */
 
-import { mkdirSync, existsSync, writeFileSync, readFileSync } from "fs";
+import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync } from "fs";
 import { join, dirname } from "path";
 import { v4 as uuid } from "uuid";
 import {
@@ -159,7 +159,6 @@ export class TaskManager {
       return [];
     }
 
-    const { readdirSync } = require("fs");
     const files = readdirSync(this.tasksDir).filter((f: string) =>
       f.endsWith(".json"),
     );

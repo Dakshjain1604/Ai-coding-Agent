@@ -98,6 +98,16 @@ export class ClaudeProvider extends BaseProvider {
       const systemMessage = messages.find((m) => m.role === "system");
       const otherMessages = messages.filter((m) => m.role !== "system");
 
+      const claudeTools = options?.tools?.map((t) => ({
+        name: t.name,
+        description: t.description,
+        input_schema: {
+          type: "object" as const,
+          properties: t.parameters.properties || {},
+          required: t.parameters.required,
+        },
+      }));
+
       const response = await this.client.messages.create({
         model,
         max_tokens: maxTokens,
@@ -106,15 +116,32 @@ export class ClaudeProvider extends BaseProvider {
         temperature: options?.temperature,
         top_p: options?.topP,
         stop_sequences: options?.stopSequences,
+        tools: claudeTools && claudeTools.length > 0 ? claudeTools : undefined,
       });
 
       const content = response.content
         .filter(
-          (block): block is Anthropic.ContentBlock & { type: "text" } =>
-            block.type === "text",
+          (block): block is Anthropic.TextBlock => block.type === "text",
         )
         .map((block) => block.text)
         .join("");
+
+      const toolCalls = response.content
+        .filter(
+          (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
+        )
+        .map((block) => ({
+          id: block.id,
+          name: block.name,
+          params: (block.input || {}) as Record<string, unknown>,
+        }));
+
+      let finishReason: "stop" | "length" | "error" | "tool_calls" = "stop";
+      if (response.stop_reason === "tool_use" || (toolCalls && toolCalls.length > 0)) {
+        finishReason = "tool_calls";
+      } else if (response.stop_reason === "max_tokens") {
+        finishReason = "length";
+      }
 
       return {
         content,
@@ -125,7 +152,8 @@ export class ClaudeProvider extends BaseProvider {
             response.usage.input_tokens + response.usage.output_tokens,
         },
         model: response.model,
-        finishReason: response.stop_reason === "end_turn" ? "stop" : "length",
+        finishReason,
+        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
       };
     } catch (error) {
       throw new ProviderError(

@@ -3,7 +3,7 @@
  * Tracks progress through plan stages and supports resumption
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs';
 import { join, basename, dirname } from 'path';
 import { getLogger } from '../../utils/logger.js';
 import type { Task } from '../../utils/types.js';
@@ -230,7 +230,6 @@ export class PlanManager {
     const filePath = this.getPlanPath(planId);
     if (!existsSync(filePath)) return false;
 
-    const { unlinkSync } = require('fs');
     unlinkSync(filePath);
     if (this.currentPlan?.id === planId) {
       this.currentPlan = null;

@@ -133,6 +133,22 @@ export interface ProviderConfig {
   [key: string]: unknown;
 }
 
+export interface ToolCall {
+  id?: string;
+  name: string;
+  params: Record<string, unknown>;
+}
+
+export interface ToolSchema {
+  name: string;
+  description: string;
+  parameters: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
 export interface CompletionOptions {
   model?: string;
   maxTokens?: number;
@@ -140,6 +156,7 @@ export interface CompletionOptions {
   topP?: number;
   stopSequences?: string[];
   systemPrompt?: string;
+  tools?: ToolSchema[];
 }
 
 export interface StreamChunk {

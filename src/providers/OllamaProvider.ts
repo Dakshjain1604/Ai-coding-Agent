@@ -65,7 +65,7 @@ export class OllamaProvider extends BaseProvider {
     return {
       streaming: true,
       embeddings: true,
-      functionCalling: false, // Limited support in Ollama
+      functionCalling: true,
       vision: false,
       maxContextLength: 128000, // Model dependent, conservative default
       supportedModels: ["qwen2.5-coder:latest", "qwen3.5:2b"],
@@ -86,7 +86,7 @@ export class OllamaProvider extends BaseProvider {
     options?: CompletionOptions,
   ): Promise<CompletionResult> {
     const model = options?.model ?? "qwen2.5-coder:latest";
-    const prompt = this.messagesToPrompt(messages, options?.systemPrompt);
+    const formattedMessages = this.formatChatMessages(messages, options?.systemPrompt);
     const mergedOptions = this.mergeOptions(options) as {
       max_tokens?: number;
       temperature?: number;
@@ -94,9 +94,18 @@ export class OllamaProvider extends BaseProvider {
       stop?: string[];
     };
 
-    const request: OllamaGenerateRequest = {
+    const ollamaTools = options?.tools?.map((t) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+
+    const body: Record<string, unknown> = {
       model,
-      prompt,
+      messages: formattedMessages,
       stream: false,
       options: {
         num_predict: mergedOptions.max_tokens,
@@ -109,11 +118,15 @@ export class OllamaProvider extends BaseProvider {
       },
     };
 
+    if (ollamaTools && ollamaTools.length > 0) {
+      body.tools = ollamaTools;
+    }
+
     try {
-      const response = await fetch(`${this.baseUrl}/api/generate`, {
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -125,17 +138,46 @@ export class OllamaProvider extends BaseProvider {
         );
       }
 
-      const data = (await response.json()) as OllamaGenerateResponse;
+      const data = (await response.json()) as {
+        model?: string;
+        message?: {
+          role?: string;
+          content?: string;
+          tool_calls?: Array<{
+            function?: {
+              name?: string;
+              arguments?: Record<string, unknown>;
+            };
+          }>;
+        };
+        done?: boolean;
+        prompt_eval_count?: number;
+        eval_count?: number;
+      };
+      const msg = data.message || {};
+      const content = msg.content || "";
+
+      let toolCalls: import("../utils/types.js").ToolCall[] | undefined;
+      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        toolCalls = msg.tool_calls.map((tc) => ({
+          name: tc.function?.name || "",
+          params: tc.function?.arguments || {},
+        }));
+      }
+
+      const inputTokens = data.prompt_eval_count ?? 0;
+      const outputTokens = data.eval_count ?? 0;
 
       return {
-        content: data.response,
+        content,
         usage: {
-          inputTokens: data.prompt_eval_count ?? this.estimateTokens(prompt),
-          outputTokens: data.eval_count ?? this.estimateTokens(data.response),
-          totalTokens: (data.prompt_eval_count ?? 0) + (data.eval_count ?? 0),
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens + outputTokens,
         },
-        model: data.model,
-        finishReason: data.done ? "stop" : "length",
+        model: data.model || model,
+        finishReason: toolCalls && toolCalls.length > 0 ? "tool_calls" : (data.done ? "stop" : "length"),
+        toolCalls,
       };
     } catch (error) {
       if (error instanceof ProviderError) throw error;
@@ -309,6 +351,24 @@ export class OllamaProvider extends BaseProvider {
         { error },
       );
     }
+  }
+
+  private formatChatMessages(
+    messages: Message[],
+    systemPrompt?: string,
+  ): Array<{ role: string; content: string }> {
+    const result: Array<{ role: string; content: string }> = [];
+    if (systemPrompt) {
+      result.push({ role: "system", content: systemPrompt });
+    }
+    for (const msg of messages) {
+      const content =
+        typeof msg.content === "string"
+          ? msg.content
+          : JSON.stringify(msg.content);
+      result.push({ role: msg.role, content });
+    }
+    return result;
   }
 
   private messagesToPrompt(messages: Message[], systemPrompt?: string): string {

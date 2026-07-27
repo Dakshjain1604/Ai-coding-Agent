@@ -7,9 +7,11 @@ import type {
   CompletionOptions,
   StreamChunk,
   ProviderType,
+  ToolCall,
+  ToolSchema,
 } from "../utils/types.js";
 
-export type { StreamChunk };
+export type { StreamChunk, ToolCall, ToolSchema };
 
 export type Message = ChatMessage;
 
@@ -57,7 +59,8 @@ export interface CompletionResult {
   content: string;
   usage: UsageStats;
   model: string;
-  finishReason: "stop" | "length" | "error";
+  finishReason: "stop" | "length" | "error" | "tool_calls";
+  toolCalls?: ToolCall[];
 }
 
 /**
