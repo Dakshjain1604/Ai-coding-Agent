@@ -1,7 +1,7 @@
 {
   "name": "coding-agent",
   "version": "0.1.0",
-  "description": "A lightweight, file-based coding CLI tool that can create, update, and manage file structures for common development tasks with minimal system overhead.",
+  "description": "An advanced, autonomous, production-grade AI coding agent featuring parallel orchestration, intelligent context management, dynamic provider fallbacks, and multi-model routing.",
   "author": "CodingAgent",
   "license": "MIT",
   "type": "module",
