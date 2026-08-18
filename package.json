@@ -5,8 +5,6 @@
   "author": "CodingAgent",
   "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "bin": {
     "coding-agent": "./bin/run.js"
   },
@@ -77,7 +75,10 @@
       "@oclif/plugin-help",
       "@oclif/plugin-plugins"
     ],
-    "topicSeparator": " "
+    "topicSeparator": " ",
+    "hooks": {
+      "command_not_found": "./dist/cli/hooks/command-not-found.js"
+    }
   },
   "engines": {
     "node": ">=18.0.0"
