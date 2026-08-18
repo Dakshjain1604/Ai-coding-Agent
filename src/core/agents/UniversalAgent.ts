@@ -27,7 +27,7 @@ marked.setOptions({
     href: chalk.blue.underline.dim,
   }),
 });
-import { SYSTEM_PROMPTS, type AgentMode } from "./system-prompts.js";
+import { SYSTEM_PROMPTS, isValidAgentMode, type AgentMode } from "./system-prompts.js";
 import { TOOL_SETS } from "./tool-sets.js";
 import type { Task, TaskResult } from "../../utils/types.js";
 import { getToolRegistry } from "../tools/ToolRegistry.js";
@@ -134,16 +134,56 @@ export class UniversalAgent extends BaseAgent {
       // The task explicitly requests a mode — this always wins, even over
       // a mode pinned at construction (a caller building a task-specific
       // override is making a more specific choice than the agent's default).
-      mode = task.metadata.mode as AgentMode;
+      // task.metadata is an untyped Record<string, unknown> — validate
+      // before trusting it as an AgentMode, rather than blindly casting.
+      // Confirmed live: an invalid mode string here used to crash setMode()
+      // with an uncaught "toolNames is not iterable" TypeError, bypassing
+      // every other graceful-failure path in this method.
+      if (isValidAgentMode(task.metadata.mode)) {
+        mode = task.metadata.mode;
+      } else {
+        this.logger.warn(
+          `Ignoring invalid task.metadata.mode: ${JSON.stringify(task.metadata.mode)}`,
+        );
+        if (!this.modeExplicitlySet) mode = this.detectMode(task.description);
+      }
     } else if (!this.modeExplicitlySet) {
       // Only auto-detect when nobody already chose a mode for this agent.
       mode = this.detectMode(task.description);
     }
-    this.setMode(mode);
-    pushSubagentContext({
-      parentTask: task,
-      parentToolNames: this.getTools().map((t) => t.name),
-    });
+
+    // setMode()/pushSubagentContext() run before the try/finally below
+    // that guarantees popSubagentContext() — anything unexpected failing
+    // here would otherwise throw uncaught (bypassing every graceful
+    // {success:false} path this method otherwise guarantees) without ever
+    // reaching that finally, so this narrow block gets its own safety net.
+    //
+    // Only call setMode() when the mode is actually changing. setMode()
+    // unconditionally does `this.tools.clear()` then repopulates from that
+    // mode's DEFAULT tool set — calling it even when the mode is unchanged
+    // silently wiped out any tool-set customization applied between
+    // construction and execute(), most notably ParallelOrchestrator's
+    // narrowChildTools(). Confirmed live: a spawned child constructed via
+    // `new UniversalAgent(plan.mode)` had shell_exec correctly stripped by
+    // narrowChildTools() immediately after construction, then execute()
+    // called setMode() with that SAME mode anyway and silently re-granted
+    // shell_exec — a real security-invariant violation ("a child can never
+    // have more capability than its parent granted it"), not just a
+    // hypothetical one.
+    try {
+      if (mode !== this.currentMode) {
+        this.setMode(mode);
+      }
+      pushSubagentContext({
+        parentTask: task,
+        parentToolNames: this.getTools().map((t) => t.name),
+      });
+    } catch (setupError) {
+      const message =
+        setupError instanceof Error ? setupError.message : String(setupError);
+      this.logger.error(`execute() failed during task setup: ${message}`);
+      return this.complete(false, `Task failed during setup: ${message}`);
+    }
 
     const turnStartWallTime = Date.now();
     let tokensUsed = 0;

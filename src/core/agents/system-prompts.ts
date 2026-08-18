@@ -4,6 +4,15 @@
 
 export type AgentMode = "code" | "debug" | "test" | "review" | "plan";
 
+/** Runtime-checkable list of AgentMode's values — the single source of
+ * truth for validating an untrusted mode string (e.g. from task.metadata,
+ * which is only cast, not checked, at its point of use). */
+export const AGENT_MODES: AgentMode[] = ["code", "debug", "test", "review", "plan"];
+
+export function isValidAgentMode(mode: unknown): mode is AgentMode {
+  return typeof mode === "string" && (AGENT_MODES as string[]).includes(mode);
+}
+
 /**
  * Shared tool format instruction appended to all prompts.
  * Reinforces the correct format and tells the model NOT to use <tool_call>.

@@ -12,12 +12,17 @@
 import type { ToolDefinition } from "./ToolRegistry.js";
 import type { ToolResult } from "../../utils/types.js";
 import type { AgentMode } from "../agents/system-prompts.js";
+import { isValidAgentMode } from "../agents/system-prompts.js";
 import {
   getCurrentSubagentContext,
   getSubagentDepth,
 } from "../agents/subagent-context.js";
 
-const VALID_MODES: AgentMode[] = ["code", "debug", "test", "review", "plan"];
+/** Caps a single spawn_subagent call's pipeline length — each subtask's
+ * description accumulates ALL prior subtasks' full output, so an
+ * unbounded subtasks array risks unbounded context growth for later
+ * subtasks in the same pipeline. */
+const MAX_SUBTASKS_PER_PIPELINE = 10;
 
 export const spawnSubagentTool: ToolDefinition = {
   name: "spawn_subagent",
@@ -40,14 +45,49 @@ export const spawnSubagentTool: ToolDefinition = {
           output: "spawn_subagent requires a non-empty `subtasks` array.",
         };
       }
+      if (rawSubtasks.length > MAX_SUBTASKS_PER_PIPELINE) {
+        return {
+          success: false,
+          output: `spawn_subagent: ${rawSubtasks.length} subtasks requested, but a single pipeline is capped at ${MAX_SUBTASKS_PER_PIPELINE} — each subtask's context accumulates every prior subtask's full output, so a longer chain risks unbounded growth. Split this into multiple spawn_subagent calls or reduce the subtask count.`,
+        };
+      }
 
-      const subtasks = rawSubtasks.map((s) => {
-        const entry = s as { mode?: string; description?: string };
-        const mode = VALID_MODES.includes(entry.mode as AgentMode)
-          ? (entry.mode as AgentMode)
-          : "code";
-        return { mode, description: String(entry.description ?? "") };
-      });
+      // Validate each entry explicitly rather than trusting a blind cast —
+      // a malformed entry (null, a bare string, a missing description)
+      // used to surface as a raw JS TypeError message that gave the model
+      // no way to tell which entry was wrong or how to fix it.
+      const malformedIndexes: number[] = [];
+      const subtasks = rawSubtasks
+        .map((s, i) => {
+          if (typeof s !== "object" || s === null) {
+            malformedIndexes.push(i);
+            return null;
+          }
+          const entry = s as { mode?: string; description?: string };
+          const description = String(entry.description ?? "").trim();
+          if (!description) {
+            malformedIndexes.push(i);
+            return null;
+          }
+          const mode: AgentMode = isValidAgentMode(entry.mode) ? entry.mode : "code";
+          return { mode, description };
+        })
+        .filter((s): s is { mode: AgentMode; description: string } => s !== null);
+
+      if (subtasks.length === 0) {
+        return {
+          success: false,
+          output:
+            "spawn_subagent: every entry in `subtasks` was malformed (missing or empty `description`). Each entry must be an object like " +
+            '{ "mode": "code", "description": "..." } with a non-empty description.',
+        };
+      }
+      if (malformedIndexes.length > 0) {
+        return {
+          success: false,
+          output: `spawn_subagent: subtasks at index ${malformedIndexes.join(", ")} are missing a valid \`description\` — fix or remove them and try again. Each entry must be an object like { "mode": "code", "description": "..." }.`,
+        };
+      }
 
       const ctx = getCurrentSubagentContext();
       if (!ctx) {

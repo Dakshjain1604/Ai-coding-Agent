@@ -71,14 +71,25 @@ export class ParallelOrchestrator {
       const agent = new UniversalAgent(plan.mode);
       this.narrowChildTools(agent, parentToolNames);
 
+      // Exclude the parent task's own `mode` from the spread — the parent
+      // might have been run with an explicit --mode, and blindly
+      // inheriting that into the subtask's metadata would silently
+      // override this subtask's intended `plan.mode` the moment
+      // UniversalAgent.execute() sees a non-"auto" task.metadata.mode
+      // (which always wins over the mode already pinned at construction).
+      // Confirmed live: a parent run with --mode=code spawning a "test"
+      // subtask would otherwise execute that subtask in "code" mode.
+      const { mode: _parentMode, ...parentMetadataWithoutMode } =
+        parentTask.metadata ?? {};
+
       const subTask: Task = {
         id: crypto.randomUUID ? crypto.randomUUID() : `sub_${Date.now()}_${i}`,
-        description: `${plan.description}\n\nContext from previous steps:\n${results.join("\n\n")}`,
+        description: `${plan.description}\n\nContext from previous steps:\n${this.boundedContext(results)}`,
         complexity: parentTask.complexity,
         status: "pending",
         createdAt: new Date(),
         updatedAt: new Date(),
-        metadata: { ...parentTask.metadata, subagentDepth: depth + 1 },
+        metadata: { ...parentMetadataWithoutMode, subagentDepth: depth + 1 },
       };
 
       const res = await agent.execute(subTask);
@@ -101,6 +112,23 @@ export class ParallelOrchestrator {
   }
 
   /**
+   * Joins prior subtasks' accumulated output for the next subtask's
+   * context, capped so a long pipeline of large outputs can't grow a
+   * later subtask's description unboundedly. Keeps the most RECENT
+   * results (truncates from the front) since those are usually most
+   * relevant to what comes next.
+   */
+  private boundedContext(results: string[]): string {
+    const MAX_CONTEXT_CHARS = 16000;
+    const joined = results.join("\n\n");
+    if (joined.length <= MAX_CONTEXT_CHARS) return joined;
+    return (
+      `...[earlier subtask output truncated to prevent unbounded context growth]...\n\n` +
+      joined.slice(joined.length - MAX_CONTEXT_CHARS)
+    );
+  }
+
+  /**
    * Restrict a freshly-spawned child's tool set to the intersection of its
    * own mode's tools and its parent's tools, minus the always-restricted
    * set — a child can never have more capability than its parent granted it.
@@ -109,11 +137,20 @@ export class ParallelOrchestrator {
     agent: UniversalAgent,
     parentToolNames: string[],
   ): void {
+    // Fails closed: an empty parentToolNames means "parent has zero known
+    // tools" (or the caller has no real info to narrow against), so the
+    // child gets zero additional tools too — never the reverse. The
+    // previous version treated an empty list as "skip narrowing entirely",
+    // which would have handed a child its full mode tool set the moment
+    // parentToolNames was ever empty, silently violating the stated
+    // invariant that a child can never have more capability than its
+    // parent granted it. Not currently reachable via the one real caller
+    // (subagent-tool.ts always passes a live agent's real tool names), but
+    // this is exactly the kind of security invariant that should hold
+    // structurally, not just because nothing exercises the gap today.
     const parentSet = new Set(parentToolNames);
     for (const tool of agent.getTools()) {
-      const allowed =
-        !CHILD_RESTRICTED_TOOLS.has(tool.name) &&
-        (parentToolNames.length === 0 || parentSet.has(tool.name));
+      const allowed = !CHILD_RESTRICTED_TOOLS.has(tool.name) && parentSet.has(tool.name);
       if (!allowed) {
         agent.unregisterTool(tool.name);
       }

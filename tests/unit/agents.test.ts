@@ -1,10 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   UniversalAgent,
   buildTaskSystemPrompt,
 } from "../../src/core/agents/UniversalAgent.js";
 import { TOOL_SETS } from "../../src/core/agents/tool-sets.js";
 import type { Task } from "../../src/utils/types.js";
+import {
+  setupFakeAgentEnv,
+  scriptedResult,
+  type FakeAgentEnv,
+} from "../helpers/agent-test-harness.js";
 
 function makeTask(metadata?: Record<string, unknown>): Task {
   return {
@@ -136,6 +141,130 @@ describe("UniversalAgent & Mode Management", () => {
       expect(result.success).toBe(true);
       expect(result.output).toContain("AWS_SECRET_ACCESS_KEY=***REDACTED***");
       expect(result.output).not.toContain("abcdEFGH12345678ijkl");
+    });
+  });
+
+  // Regression tests for the invalid-task.metadata.mode crash fix: a bare
+  // `task.metadata.mode as AgentMode` cast used to reach setMode() with an
+  // unvalidated string, crashing with "toolNames is not iterable" the
+  // moment TOOL_SETS[mode] came back undefined. execute() now validates
+  // via isValidAgentMode() before ever calling setMode(), and falls back
+  // to auto-detection (or the agent's constructed mode, if one was pinned)
+  // instead. These drive the REAL execute() loop through the FakeProvider
+  // harness (not a hand-mocked internal call) so the fix is verified on
+  // the actual production path, matching the discipline used throughout
+  // tests/e2e/agent-loop.test.ts.
+  describe("execute() mode validation (invalid task.metadata.mode crash fix)", () => {
+    let env: FakeAgentEnv;
+
+    afterEach(() => {
+      env?.cleanup();
+    });
+
+    function makeModeTask(description: string, mode?: unknown): Task {
+      return {
+        id: "t-mode",
+        description,
+        complexity: "simple",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        metadata: { mode },
+      };
+    }
+
+    it("does not crash on an invalid mode string and falls back to auto-detection", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Fixed it.")]);
+      const agent = new UniversalAgent(); // no explicit mode pinned
+      const result = await agent.execute(
+        makeModeTask("Fix breaking exception in database connection", "not-a-real-mode"),
+      );
+
+      expect(result.success).toBe(true);
+      // detectMode() would resolve this description to "debug" — proves
+      // the invalid mode was ignored and auto-detection ran instead of
+      // crashing setMode().
+      expect(result.agentType).toBe("debug");
+    });
+
+    it("uses a valid explicit mode correctly, overriding the constructed default", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Reviewed.")]);
+      const agent = new UniversalAgent("code");
+      const result = await agent.execute(makeModeTask("look at this code", "review"));
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("review");
+    });
+
+    it("treats 'auto' as no explicit override and falls back to auto-detection", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Test run complete.")]);
+      const agent = new UniversalAgent();
+      const result = await agent.execute(
+        makeModeTask("Run unit test suite and check coverage", "auto"),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("test");
+    });
+
+    it("does not crash when task.metadata.mode is a number, and falls back to auto-detection", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Planned.")]);
+      const agent = new UniversalAgent();
+      const result = await agent.execute(makeModeTask("plan the next steps", 42));
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("plan");
+    });
+
+    it("does not crash when task.metadata.mode is a plain object, and falls back to auto-detection", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Reviewed.")]);
+      const agent = new UniversalAgent();
+      const result = await agent.execute(
+        makeModeTask("review and refactor this", { nested: "review" }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("review");
+    });
+
+    it("does not crash when task.metadata.mode is null, and falls back to auto-detection", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Fixed.")]);
+      const agent = new UniversalAgent();
+      const result = await agent.execute(makeModeTask("debug this crash", null));
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("debug");
+    });
+
+    it("keeps the agent's explicitly-constructed mode when task.metadata.mode is invalid, instead of auto-detecting", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Handled in plan mode.")]);
+      // Constructed with an explicit mode ("plan") — modeExplicitlySet is
+      // true, so an invalid task mode must NOT fall through to
+      // detectMode(); it should keep the pinned "plan" mode even though
+      // the description would otherwise auto-detect as "debug".
+      const agent = new UniversalAgent("plan");
+      const result = await agent.execute(
+        makeModeTask("fix this breaking exception", "still-not-real"),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("plan");
+    });
+
+    it("keeps the agent's explicitly-constructed mode when task.metadata has no mode key at all", async () => {
+      env = setupFakeAgentEnv([scriptedResult("Handled in review mode.")]);
+      const agent = new UniversalAgent("review");
+      const result = await agent.execute({
+        id: "t-no-meta",
+        description: "fix this breaking exception",
+        complexity: "simple",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.agentType).toBe("review");
     });
   });
 });
