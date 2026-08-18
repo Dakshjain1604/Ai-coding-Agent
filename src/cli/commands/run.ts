@@ -24,7 +24,13 @@ export default class RunCommand extends Command {
 
   static flags = {
     mode: Flags.string({
-      options: ["auto", "interactive", "autonomous"],
+      // "autonomous" removed: it selected AutonomousMode, which was fully
+      // unreachable dead code (no caller anywhere ever instantiated it)
+      // and is now deleted outright rather than wired up — its
+      // "self-correction" loop didn't actually incorporate a failed
+      // iteration's output into the next attempt, so it would have needed
+      // a real redesign, not just a wiring fix, to be worth exposing.
+      options: ["auto", "interactive"],
       default: "auto",
       description: "Execution mode",
     }),

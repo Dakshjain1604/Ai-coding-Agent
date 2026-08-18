@@ -9,7 +9,38 @@ import { getLogger } from "../../utils/logger.js";
 import { executeTask } from "../../core/orchestrator/AgentSpawner.js";
 import { validateProviders } from "../../utils/healthcheck.js";
 import { getPermissionSystem } from "../../utils/permission-system.js";
-import type { Task } from "../../utils/types.js";
+import type { Task, TaskResult } from "../../utils/types.js";
+
+/**
+ * `--format` used to be accepted, stored in task.metadata, and never read
+ * anywhere — every format produced identical plain-text output. json/
+ * markdown now actually shape the output; "text" is unchanged from
+ * before (only the failure path prints result.output — on success the
+ * agent's own response has already streamed live to the terminal during
+ * execution, so re-printing it here would just duplicate it).
+ */
+export function formatReviewOutput(
+  result: TaskResult,
+  format: string,
+  target: string,
+  focus: string,
+): string {
+  if (format === "json") {
+    return JSON.stringify(
+      { target, focus, success: result.success, output: result.output },
+      null,
+      2,
+    );
+  }
+
+  if (format === "markdown") {
+    const status = result.success ? "Passed" : "Failed";
+    return `## Review: ${target}\n\n- **Focus:** ${focus}\n- **Status:** ${status}\n\n${result.output}`;
+  }
+
+  if (result.success) return "";
+  return `${chalk.red.bold("\n✗ Review failed!\n")}${chalk.white(result.output)}`;
+}
 
 export default class ReviewCommand extends Command {
   static description = "Review code for quality, security, and best practices";
@@ -87,11 +118,8 @@ export default class ReviewCommand extends Command {
 
     try {
       const result = await executeTask(task);
-
-      if (!result.success) {
-        this.log(chalk.red.bold("\n✗ Review failed!\n"));
-        this.log(chalk.white(result.output));
-      }
+      const formatted = formatReviewOutput(result, flags.format, args.target, flags.focus);
+      if (formatted) this.log(formatted);
     } catch (error) {
       this.error(
         chalk.red(
