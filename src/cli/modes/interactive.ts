@@ -10,7 +10,7 @@ import { getSkillRegistry } from "../../skills/SkillRegistry.js";
 import { getHookManager } from "../../hooks/HookManager.js";
 import { registerBuiltinHooks } from "../../hooks/registerBuiltinHooks.js";
 import { getAgentSpawner } from "../../core/orchestrator/AgentSpawner.js";
-import { getConfigManager } from "../../utils/config.js";
+import { getConfigManager, maskApiKey } from "../../utils/config.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
 import { getTaskManager } from "../../utils/task-manager.js";
 import {
@@ -43,7 +43,20 @@ export class InteractiveMode {
     console.clear();
     this.printWelcome(systemCaps);
 
-    await this.initializeSystems();
+    try {
+      await this.initializeSystems();
+    } catch (error) {
+      // e.g. an invalid coding-agent.json/config.yaml fails Zod validation
+      // in ConfigManager.load() — this used to crash interactive mode with
+      // a raw, unhandled stack trace before the user ever saw the prompt.
+      console.log(
+        chalk.red(
+          `\nFailed to start interactive mode: ${(error as Error).message}\n`,
+        ),
+      );
+      this.running = false;
+      return;
+    }
 
     while (this.running) {
       try {
@@ -313,14 +326,22 @@ export class InteractiveMode {
 
     if (subcommand === "set") {
       const key = args[1];
-      const value = args.slice(2).join(" ");
-      if (!key || value === undefined) {
+      // args.slice(2).join(" ") on a missing value is "" — NOT undefined —
+      // so `value === undefined` never caught a forgotten value argument.
+      // Confirmed live: `/config set defaults.preferLocal` (no third
+      // token) silently proceeded with value="", which configSet()'s own
+      // "true"/"false"/Number() coercion then turns into the NUMBER 0
+      // (Number("") === 0), silently corrupting the config key instead of
+      // showing this usage message. args.length is what actually reflects
+      // whether a value token was provided at all.
+      if (!key || args.length < 3) {
         console.log(chalk.yellow("Usage: /config set <key> <value>"));
         console.log(
           chalk.gray("Example: /config set defaults.preferLocal false"),
         );
         return;
       }
+      const value = args.slice(2).join(" ");
       this.configSet(key, value);
       return;
     }
@@ -359,6 +380,9 @@ export class InteractiveMode {
     console.log("");
 
     console.log(chalk.bold("Providers:"));
+    // apiKey is intentionally never printed here, even masked — this loop
+    // must stay scoped to non-secret fields, not "helpfully" grow to cover
+    // it later (mirrors the same comment in cli/commands/config.ts).
     for (const provider of config.providers) {
       console.log(
         chalk.gray(`  - ${provider.type} (enabled: ${provider.enabled})`),
@@ -469,8 +493,18 @@ export class InteractiveMode {
       return;
     }
 
+    // Mirrors cli/commands/config.ts's get() — that fix (Phase 2, C1) only
+    // ever reached the standalone `config get` CLI command; this is a
+    // separate implementation of the same feature and never got it.
+    // Confirmed live: /config get providers.0.apiKey printed a real,
+    // unmasked API key straight to the terminal.
+    const display =
+      key.endsWith("apiKey") && typeof value === "string"
+        ? maskApiKey(value)
+        : value;
+
     console.log(chalk.bold(`${key}:`));
-    console.log(chalk.cyan(JSON.stringify(value, null, 2)));
+    console.log(chalk.cyan(JSON.stringify(display, null, 2)));
     console.log("");
   }
 
