@@ -3,7 +3,7 @@
  * Routes tasks to optimal models based on complexity, cost, and availability
  */
 
-import type { ProviderType, AppConfig } from "../utils/types.js";
+import type { ProviderType } from "../utils/types.js";
 import { getLogger } from "../utils/logger.js";
 import { ProviderFactory } from "./ProviderFactory.js";
 import { BaseProvider } from "./ProviderInterface.js";
@@ -265,11 +265,26 @@ export class ModelRouter {
     ) {
       const resolvedCustomProvider = this.resolveProvider(customRule.provider);
       if (!this.isPaidProvider(resolvedCustomProvider) || this.canMakePaidCall()) {
-        return this.routeToRule(customRule, estimatedTokens);
+        // Unlike the default-rule branch just below, this never checked
+        // isAvailable() before handing back the provider — a custom rule
+        // pointing at an unconfigured/unreachable provider would return a
+        // RoutingResult that fails on the first actual LLM call instead of
+        // falling through to the default rule / fallback chain here, the
+        // same way an unavailable default-rule provider already does.
+        // Falls through (rather than jumping straight to routeToFallback)
+        // to stay consistent with the paid-budget-exceeded case just
+        // below, which also gives the default rule a chance first.
+        if (await this.factory.isAvailable(resolvedCustomProvider)) {
+          return this.routeToRule(customRule, estimatedTokens);
+        }
+        this.logger.debug(
+          `Custom rule for ${taskCategory} skipped: ${resolvedCustomProvider} is not available`,
+        );
+      } else {
+        this.logger.debug(
+          `Custom rule for ${taskCategory} skipped: paid API call limit reached for ${resolvedCustomProvider}`,
+        );
       }
-      this.logger.debug(
-        `Custom rule for ${taskCategory} skipped: paid API call limit reached for ${resolvedCustomProvider}`,
-      );
     }
 
     // Check default rules (local-first or cloud-first, per this.config.preferLocal)

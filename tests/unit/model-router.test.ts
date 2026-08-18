@@ -94,6 +94,39 @@ afterEach(() => {
   resetModelRouter();
 });
 
+describe("ModelRouter — custom rule availability check (the fix)", () => {
+  it("falls through to the default/fallback chain when a custom rule's provider is unavailable, instead of returning it anyway", async () => {
+    // claude is NOT seeded — genuinely unavailable, matching a
+    // misconfigured/missing-API-key custom rule in real usage.
+    seedProviders(["groq"]);
+    const router = new ModelRouter({
+      preferLocal: false,
+      fallbackToPaid: true,
+      maxPaidApiCalls: 0,
+      costPreference: "balanced",
+      customRules: [{ taskCategory: "code", provider: "claude", model: "claude-sonnet-4-6" }],
+    });
+
+    const result = await router.route("code");
+    expect(result.provider.getType()).not.toBe("claude");
+    expect(result.provider.getType()).toBe("groq");
+  });
+
+  it("still uses the custom rule's provider when it genuinely is available", async () => {
+    seedProviders(["claude", "groq"]);
+    const router = new ModelRouter({
+      preferLocal: false,
+      fallbackToPaid: true,
+      maxPaidApiCalls: 0,
+      costPreference: "balanced",
+      customRules: [{ taskCategory: "code", provider: "claude", model: "claude-sonnet-4-6" }],
+    });
+
+    const result = await router.route("code");
+    expect(result.provider.getType()).toBe("claude");
+  });
+});
+
 describe("ModelRouter — canMakePaidCall()/recordCall() wiring (the fix)", () => {
   it("routes to a paid provider via a custom rule when under the cap", async () => {
     seedProviders(["claude"]);
