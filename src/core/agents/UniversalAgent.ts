@@ -68,12 +68,24 @@ export class UniversalAgent extends BaseAgent {
   private currentMode: AgentMode = "code";
   /** Incrementing counter for turn numbers across the agent's lifetime */
   private turnCounter: number = 0;
+  /**
+   * True when the caller explicitly pinned a mode at construction (e.g.
+   * ParallelOrchestrator building a sub-agent for a specific pipeline
+   * step). execute() must respect that choice rather than silently
+   * overriding it via detectMode() — this was a real bug: every
+   * spawn_subagent subtask's intended mode was being discarded in favor
+   * of a guess from the subtask's description text, since subtasks don't
+   * carry task.metadata.mode. False only for the auto-detecting
+   * `new UniversalAgent()` (no mode) case, e.g. AgentSpawner's default path.
+   */
+  private modeExplicitlySet = false;
 
   constructor(mode?: AgentMode) {
     super("code", {});
     // Ensure built-in tools are registered in the singleton ToolRegistry
     ensureBuiltinToolsRegistered();
     if (mode) {
+      this.modeExplicitlySet = true;
       this.setMode(mode);
     } else {
       this.registerDefaultTools();
@@ -117,8 +129,12 @@ export class UniversalAgent extends BaseAgent {
   async execute(task: Task): Promise<TaskResult> {
     let mode = this.currentMode;
     if (task.metadata?.mode && task.metadata.mode !== "auto") {
+      // The task explicitly requests a mode — this always wins, even over
+      // a mode pinned at construction (a caller building a task-specific
+      // override is making a more specific choice than the agent's default).
       mode = task.metadata.mode as AgentMode;
-    } else {
+    } else if (!this.modeExplicitlySet) {
+      // Only auto-detect when nobody already chose a mode for this agent.
       mode = this.detectMode(task.description);
     }
     this.setMode(mode);
@@ -152,7 +168,6 @@ export class UniversalAgent extends BaseAgent {
           spinner: "dots",
         }).start();
         await context.memory.initSession();
-        await context.memory.startConversation();
         memorySpinner.succeed("Context loaded");
 
         // Context Epoch: build the baseline system prompt once (mode +

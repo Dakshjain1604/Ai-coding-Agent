@@ -992,12 +992,17 @@ export abstract class BaseAgent {
   protected abstract buildSystemPrompt(): string;
 
   /**
-   * Parse tool calls from LLM output - delegates to tool-parser.ts
+   * Parse tool calls from LLM output - delegates to tool-parser.ts.
+   * Passes this agent's actual registered tool names as the known-tools
+   * gate (see tool-parser.ts) instead of relying on its hardcoded fallback
+   * list, which would otherwise silently drop calls to any tool not on
+   * that stale list (previously missing most real tools, e.g.
+   * workspace_verify, and including some that never existed).
    */
   protected parseToolCalls(
     output: string,
   ): Array<{ name: string; params: Record<string, unknown> }> {
-    return parseToolCalls(output) as Array<{
+    return parseToolCalls(output, new Set(this.tools.keys())) as Array<{
       name: string;
       params: Record<string, unknown>;
     }>;
