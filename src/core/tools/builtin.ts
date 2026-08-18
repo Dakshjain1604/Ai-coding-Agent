@@ -163,7 +163,14 @@ export const fileWrite: ToolDefinition = {
       // Check dependent files via AST dependency graph
       let depMsg = "";
       try {
-        const dependents = getDependencyGraph().getDependentFiles(path);
+        const graph = getDependencyGraph();
+        // The graph only builds once (lazily) and never rebuilds on its
+        // own — without invalidating first, every write after the first
+        // one in a session would silently report dependents from a
+        // pre-edit snapshot of the tree, missing the very changes that
+        // just happened.
+        graph.invalidate();
+        const dependents = graph.getDependentFiles(path);
         if (dependents.length > 0) {
           depMsg = ` (Dependent files flagged for audit: ${dependents.map((f) => basename(f)).join(", ")})`;
         }

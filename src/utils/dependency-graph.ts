@@ -55,6 +55,19 @@ export class DependencyGraph {
   }
 
   /**
+   * Discard the built graph so the next getDependentFiles() call triggers
+   * a fresh scan. getDependentFiles() only builds once (lazily, when
+   * empty) and never rebuilds on its own — call sites that mutate the
+   * filesystem between calls (e.g. file_write, right before checking
+   * dependents of the file it just wrote) must invalidate first, or
+   * every call after the first silently reports dependents from a
+   * pre-edit snapshot of the tree.
+   */
+  public invalidate(): void {
+    this.nodes.clear();
+  }
+
+  /**
    * Get all files that import the target file directly or indirectly
    */
   public getDependentFiles(targetFile: string): string[] {
