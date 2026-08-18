@@ -102,7 +102,7 @@ export class OllamaCloudProvider extends BaseProvider {
           totalTokens: response.usage?.total_tokens ?? 0,
         },
         model: response.model,
-        finishReason: choice.finish_reason as "stop" | "length",
+        finishReason: this.mapFinishReason(choice.finish_reason),
       };
     } catch (error) {
       throw new ProviderError(
@@ -137,6 +137,8 @@ export class OllamaCloudProvider extends BaseProvider {
           };
         }
       }
+
+      yield { content: "", done: true };
     } catch (error) {
       throw new ProviderError(
         `OllamaCloud streaming error: ${error instanceof Error ? error.message : "Unknown error"}`,
@@ -180,5 +182,14 @@ export class OllamaCloudProvider extends BaseProvider {
           ? msg.content
           : JSON.stringify(msg.content),
     }));
+  }
+
+  private mapFinishReason(
+    reason: string | null | undefined,
+  ): "stop" | "length" | "error" | "tool_calls" {
+    if (reason === "stop") return "stop";
+    if (reason === "length") return "length";
+    if (reason === "tool_calls" || reason === "function_call") return "tool_calls";
+    return "error";
   }
 }
