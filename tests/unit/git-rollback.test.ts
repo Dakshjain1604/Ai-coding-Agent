@@ -51,6 +51,33 @@ describe("RollbackManager — snapshot/rollback (in-memory)", () => {
     expect(readFileSync(target, "utf-8")).toBe("v1");
   });
 
+  it("normalizes relative and absolute paths to the same snapshot — the apply/rollback path-mismatch fix", () => {
+    // Confirmed live before this fix: apply.ts's applyDiff() snapshots
+    // using an ABSOLUTE path (diff.sourcePath), while the `rollback` CLI
+    // command looks paths up using whatever string the user types —
+    // typically the RELATIVE path apply's own output just showed them.
+    // hasBackup()/rollback() on the relative form silently reported "no
+    // backup found" even though one existed, keyed under a different hash.
+    writeFileSync(target, "v1");
+    rb.snapshot(target); // absolute path, like applyDiff()
+    writeFileSync(target, "v2");
+
+    expect(rb.hasBackup("file.txt")).toBe(true); // relative path, like the CLI
+    const restored = rb.rollback("file.txt");
+    expect(restored).toBe(true);
+    expect(readFileSync(target, "utf-8")).toBe("v1");
+  });
+
+  it("normalizes the other direction too: snapshot via relative path, look up via absolute", () => {
+    writeFileSync(target, "v1");
+    rb.snapshot("file.txt");
+    writeFileSync(target, "v2");
+
+    expect(rb.hasBackup(target)).toBe(true);
+    expect(rb.rollback(target)).toBe(true);
+    expect(readFileSync(target, "utf-8")).toBe("v1");
+  });
+
   it("returns false rolling back a file that was never snapshotted", () => {
     writeFileSync(target, "untouched");
     expect(rb.rollback(target)).toBe(false);

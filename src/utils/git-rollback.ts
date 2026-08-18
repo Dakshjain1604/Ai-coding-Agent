@@ -23,7 +23,7 @@ import {
   mkdirSync,
   readdirSync,
 } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { createHash } from "crypto";
 import chalk from "chalk";
 
@@ -44,13 +44,28 @@ function backupFileNameFor(filePath: string): string {
 export class RollbackManager {
   private snapshots: Map<string, FileSnapshot[]> = new Map();
   private readonly backupDir: string;
+  private readonly projectRoot: string;
 
   constructor(projectRoot?: string) {
-    this.backupDir = join(
-      projectRoot ?? process.cwd(),
-      ".claude",
-      "rollback-backups",
-    );
+    this.projectRoot = projectRoot ?? process.cwd();
+    this.backupDir = join(this.projectRoot, ".claude", "rollback-backups");
+  }
+
+  /**
+   * Normalizes a caller-supplied path to an absolute, canonical form before
+   * it's used as a snapshot key or hashed into a backup filename. Without
+   * this, two calls for the "same" file that happen to pass different
+   * string forms (relative vs. absolute) silently miss each other — hash
+   * is computed over the literal string, not the file it resolves to.
+   * Confirmed live: applyDiff() (apply.ts) snapshots using an ABSOLUTE
+   * path (diff.sourcePath), while the `rollback` CLI command looks paths
+   * up using whatever string the user types — typically the RELATIVE path
+   * apply's own output just showed them. hasBackup()/rollback() on that
+   * relative path silently reported "no backup found" even though one
+   * genuinely existed on disk, keyed under the absolute path's hash.
+   */
+  private normalize(filePath: string): string {
+    return resolve(this.projectRoot, filePath);
   }
 
   /**
@@ -58,6 +73,7 @@ export class RollbackManager {
    * don't exist yet — there's nothing to lose by creating a new file.
    */
   public snapshot(filePath: string): void {
+    filePath = this.normalize(filePath);
     if (!existsSync(filePath)) return;
 
     try {
@@ -109,6 +125,7 @@ export class RollbackManager {
    * the common case for a fresh CLI invocation restoring after a prior run.
    */
   public rollback(filePath: string): boolean {
+    filePath = this.normalize(filePath);
     const history = this.snapshots.get(filePath);
     if (history && history.length > 0) {
       const last = history[history.length - 1];
@@ -137,6 +154,7 @@ export class RollbackManager {
 
   /** Whether any snapshot (in-memory or on-disk) exists for this file. */
   public hasBackup(filePath: string): boolean {
+    filePath = this.normalize(filePath);
     if ((this.snapshots.get(filePath)?.length ?? 0) > 0) return true;
     return existsSync(join(this.backupDir, backupFileNameFor(filePath)));
   }
@@ -146,6 +164,7 @@ export class RollbackManager {
    * preview what "undo" would do before committing to it.
    */
   public peekBackup(filePath: string): FileSnapshot | undefined {
+    filePath = this.normalize(filePath);
     const history = this.snapshots.get(filePath);
     if (history && history.length > 0) return history[history.length - 1];
     return this.readFromDisk(filePath);
