@@ -35,27 +35,40 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
   const checks: HealthCheckResult[] = [];
   let primaryProvider = "local";
 
+  // primaryProvider is assigned in strict priority order (matching
+  // CLAUDE.md's documented fallback chain: Ollama, Anthropic, OpenAI,
+  // Gemini, Groq, OpenRouter, HuggingFace) via a single primaryChosen
+  // flag, rather than each block re-deriving "is everything higher-
+  // priority than me unavailable?" from scratch. The old per-block
+  // negation chains drifted out of sync with each other — Gemini's
+  // block never assigned primaryProvider at all, and Groq/OpenRouter's
+  // conditions didn't check `!openaiCheck?.available`, so a lower-
+  // priority provider could silently clobber a correctly-selected
+  // higher-priority one whenever both were available.
+  let primaryChosen = false;
+
   // Check Ollama/Local provider first (default)
   const localCheck = await checkLocalProvider(factory);
   checks.push(localCheck);
   if (localCheck.available) {
     primaryProvider = "local";
+    primaryChosen = true;
   }
 
   // Check Claude if enabled
   const claudeEnabled = config.providers.find(
     (p: ProviderConfig) => p.type === "claude",
   )?.enabled;
-  let claudeCheck: HealthCheckResult | null = null;
   if (claudeEnabled) {
-    claudeCheck = await checkCloudProvider(
+    const claudeCheck = await checkCloudProvider(
       factory,
       "claude",
       "ANTHROPIC_API_KEY",
     );
     checks.push(claudeCheck);
-    if (!localCheck.available && claudeCheck.available) {
+    if (!primaryChosen && claudeCheck.available) {
       primaryProvider = "claude";
+      primaryChosen = true;
     }
   }
 
@@ -70,12 +83,9 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
       "OPENAI_API_KEY / NVIDIA_API_KEY",
     );
     checks.push(openaiCheck);
-    if (
-      !localCheck.available &&
-      !claudeCheck?.available &&
-      openaiCheck.available
-    ) {
+    if (!primaryChosen && openaiCheck.available) {
       primaryProvider = "openai";
+      primaryChosen = true;
     }
   }
 
@@ -90,22 +100,22 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
       "GOOGLE_API_KEY",
     );
     checks.push(geminiCheck);
+    if (!primaryChosen && geminiCheck.available) {
+      primaryProvider = "gemini";
+      primaryChosen = true;
+    }
   }
 
   // Check Groq if enabled (free tier!)
   const groqEnabled = config.providers.find(
     (p: ProviderConfig) => p.type === "groq",
   )?.enabled;
-  let groqCheck: HealthCheckResult | null = null;
   if (groqEnabled) {
-    groqCheck = await checkCloudProvider(factory, "groq", "GROQ_API_KEY");
+    const groqCheck = await checkCloudProvider(factory, "groq", "GROQ_API_KEY");
     checks.push(groqCheck);
-    if (
-      !localCheck.available &&
-      !claudeCheck?.available &&
-      groqCheck.available
-    ) {
+    if (!primaryChosen && groqCheck.available) {
       primaryProvider = "groq";
+      primaryChosen = true;
     }
   }
 
@@ -113,21 +123,16 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
   const openrouterEnabled = config.providers.find(
     (p: ProviderConfig) => p.type === "openrouter",
   )?.enabled;
-  let openrouterCheck: HealthCheckResult | null = null;
   if (openrouterEnabled) {
-    openrouterCheck = await checkCloudProvider(
+    const openrouterCheck = await checkCloudProvider(
       factory,
       "openrouter",
       "OPENROUTER_API_KEY",
     );
     checks.push(openrouterCheck);
-    if (
-      !localCheck.available &&
-      !claudeCheck?.available &&
-      !groqCheck?.available &&
-      openrouterCheck.available
-    ) {
+    if (!primaryChosen && openrouterCheck.available) {
       primaryProvider = "openrouter";
+      primaryChosen = true;
     }
   }
 
@@ -142,6 +147,10 @@ export async function checkProviderHealth(): Promise<ProviderHealthStatus> {
       "HUGGINGFACE_API_KEY",
     );
     checks.push(hfCheck);
+    if (!primaryChosen && hfCheck.available) {
+      primaryProvider = "huggingface";
+      primaryChosen = true;
+    }
   }
 
   const healthy = checks.some((c) => c.available);
