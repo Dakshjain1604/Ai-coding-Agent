@@ -3,7 +3,6 @@
  * Provides common functionality for task execution, tool usage, and memory
  */
 
-import { v4 as uuid } from "uuid";
 import { getLogger } from "../../utils/logger.js";
 import { getSystemAnalyzer } from "../../utils/system-analyzer.js";
 import type {
@@ -20,7 +19,6 @@ import type {
   StreamChunk,
 } from "../../providers/ProviderInterface.js";
 import type { BaseProvider } from "../../providers/ProviderInterface.js";
-import { getProviderFactory } from "../../providers/ProviderFactory.js";
 import { getModelRouter } from "../../providers/ModelRouter.js";
 import { getConfigManager } from "../../utils/config.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
@@ -101,7 +99,28 @@ export abstract class BaseAgent {
       const props =
         (tool.parameters.properties as Record<string, unknown>) ||
         tool.parameters;
-      const req = (tool.parameters.required as string[]) || [];
+      // AgentTool.parameters is a FLAT map (e.g. {path: {type, required},
+      // content: {type, required}}), not a JSON-Schema-style {properties,
+      // required} object — there is no top-level `.required` field on it
+      // to read. `tool.parameters.required` was therefore always
+      // undefined, so `req` was always `[]` for every tool, meaning the
+      // `required` array sent to every provider's native function-calling
+      // API (OpenAI/Claude/Gemini/Groq/OpenRouter all forward this
+      // ToolSchema.parameters object verbatim into their request) told
+      // the model that NOTHING was ever required, for every tool. Now
+      // correctly derives it from each individual parameter's own
+      // `required: true` flag, which is what ToolRegistry.
+      // validateParameters() (the downstream enforcement layer) already
+      // reads correctly — this was purely a gap in what got told to the
+      // model upfront, not a validation hole.
+      const req = Object.entries(tool.parameters)
+        .filter(
+          ([, param]) =>
+            typeof param === "object" &&
+            param !== null &&
+            (param as { required?: boolean }).required === true,
+        )
+        .map(([name]) => name);
       schemas.push({
         name: tool.name,
         description: tool.description,
@@ -161,14 +180,6 @@ export abstract class BaseAgent {
    */
   getTools(): AgentTool[] {
     return Array.from(this.tools.values());
-  }
-
-  /**
-   * Spawn a subtask (to be implemented by specific agents)
-   */
-  async spawn(subtask: Task): Promise<TaskResult> {
-    // This is implemented by the orchestrator
-    throw new Error("spawn() must be implemented by subclass");
   }
 
   /**
