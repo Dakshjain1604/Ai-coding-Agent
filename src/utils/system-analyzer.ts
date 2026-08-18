@@ -3,8 +3,6 @@
  */
 
 import { cpus, totalmem, freemem, loadavg } from "os";
-import { readFileSync } from "fs";
-import { join } from "path";
 
 export interface SystemCapabilities {
   cpuCount: number;
