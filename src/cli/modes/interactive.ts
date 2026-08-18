@@ -238,6 +238,10 @@ export class InteractiveMode {
         await this.showMemory();
         break;
 
+      case "undo":
+        await this.handleUndo(args);
+        break;
+
       case "system":
       case "sys":
         this.showSystemCapabilities();
@@ -403,6 +407,38 @@ export class InteractiveMode {
       removed
         ? chalk.green(`Forgot: ${fact}`)
         : chalk.yellow(`No matching memory found for: ${fact}`),
+    );
+  }
+
+  private async handleUndo(args: string[]): Promise<void> {
+    const { getRollbackManager } = await import("../../utils/git-rollback.js");
+    const rollback = getRollbackManager();
+
+    const path = args.join(" ").trim();
+    if (!path) {
+      const files = rollback.listBackedUpFiles();
+      if (files.length === 0) {
+        console.log(chalk.yellow("No recoverable backups yet."));
+        return;
+      }
+      console.log(chalk.bold.cyan(`\n${files.length} file(s) with a recoverable backup:\n`));
+      for (const file of files) {
+        console.log(`  ${file}`);
+      }
+      console.log(chalk.gray("\nUsage: /undo <path>"));
+      return;
+    }
+
+    if (!rollback.hasBackup(path)) {
+      console.log(chalk.yellow(`No backup found for ${path} — nothing to restore.`));
+      return;
+    }
+
+    const restored = rollback.rollback(path);
+    console.log(
+      restored
+        ? chalk.green(`Restored ${path} from backup.`)
+        : chalk.red(`Failed to restore ${path}.`),
     );
   }
 
@@ -716,6 +752,18 @@ export class InteractiveMode {
       chalk.cyan("│  ") +
         chalk.gray("/memory             ") +
         chalk.white("Show preferences & project knowledge"),
+    );
+    console.log(chalk.cyan("│"));
+    console.log(chalk.cyan("├─ ") + chalk.bold("Undo"));
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/undo <path>        ") +
+        chalk.white("Restore a file from its pre-write backup"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/undo               ") +
+        chalk.white("List files with a recoverable backup"),
     );
     console.log(chalk.cyan("│"));
     console.log(chalk.cyan("├─ ") + chalk.bold("System"));

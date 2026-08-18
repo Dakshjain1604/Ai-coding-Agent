@@ -26,6 +26,7 @@ import { getLogger } from "../../utils/logger.js";
 import { formatFile } from "../../utils/formatter.js";
 import { getDependencyGraph } from "../../utils/dependency-graph.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
+import { getRollbackManager } from "../../utils/git-rollback.js";
 
 const execAsync = promisify(exec);
 
@@ -128,6 +129,13 @@ export const fileWrite: ToolDefinition = {
         finalContent = content + "\n" + readFileSync(path, "utf-8");
       }
 
+      // Snapshot before overwriting an existing file — this is the ACTIVE
+      // file_write implementation (the one in file-system.ts is only
+      // registered for file_exists/file_copy/file_move/file_restore, this
+      // one wins for file_write/file_delete/file_read/file_list — see
+      // registerBuiltinTools()'s FS_EXTRAS comment). file_write operates
+      // on the real project tree by default, with no other undo path.
+      getRollbackManager().snapshot(path);
       writeFileSync(path, finalContent, "utf-8");
 
       // Auto-format post write
@@ -193,7 +201,12 @@ export const fileDelete: ToolDefinition = {
             output: `Cannot delete non-empty directory without recursive=true`,
           };
         }
+        // Recursive directory deletes aren't snapshotted — that would mean
+        // backing up an entire subtree, a bigger feature than the
+        // single-file safety net this phase adds. Single-file deletes
+        // (the common case) are fully covered below.
       } else {
+        getRollbackManager().snapshot(path);
         unlinkSync(path);
       }
 
@@ -942,21 +955,13 @@ export function registerBuiltinTools(
     registry.register(tool);
   }
 
-  // file-system.ts duplicates file_read/file_write/file_delete/file_list
-  // (already registered above from this file) — only register the tools it
-  // defines that don't collide. `directory_create` in particular already has
-  // a dedicated permission-system rule (permission-system.ts) despite never
-  // having been registered anywhere.
-  const FS_EXTRAS = new Set([
-    "file_exists",
-    "file_copy",
-    "file_move",
-    "directory_create",
-  ]);
+  // file_exists/file_copy/file_move/directory_create/file_restore — the
+  // file_read/file_write/file_delete/file_list this file used to ALSO
+  // define here were removed after the duplication caused a real bug (see
+  // file-system.ts's file header): this file's own fileWrite/fileDelete
+  // above are the ones actually reachable through the tool registry.
   for (const tool of createFileSystemTools()) {
-    if (FS_EXTRAS.has(tool.name)) {
-      registry.register(tool);
-    }
+    registry.register(tool);
   }
 
   // Sub-agent delegation (see core/orchestrator/ParallelOrchestrator.ts).

@@ -8,6 +8,7 @@ export const TOOL_SETS: Record<AgentMode, string[]> = {
   code: [
     "file_read",
     "file_write",
+    "file_restore",
     "directory_create",
     "search_files",
     "search_content",
@@ -23,6 +24,7 @@ export const TOOL_SETS: Record<AgentMode, string[]> = {
   debug: [
     "file_read",
     "file_write",
+    "file_restore",
     "search_content",
     "grep",
     "find_usages",
@@ -38,6 +40,7 @@ export const TOOL_SETS: Record<AgentMode, string[]> = {
   test: [
     "file_read",
     "file_write",
+    "file_restore",
     "search_content",
     "grep",
     // test_run already accepts { coverage: true } — no separate

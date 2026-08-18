@@ -34,6 +34,10 @@ import inquirer from "inquirer";
 import { UniversalAgent } from "../../src/core/agents/UniversalAgent.js";
 import { getHookManager } from "../../src/hooks/HookManager.js";
 import { registerBuiltinHooks } from "../../src/hooks/registerBuiltinHooks.js";
+import {
+  getRollbackManager,
+  resetRollbackManager,
+} from "../../src/utils/git-rollback.js";
 import type { Task } from "../../src/utils/types.js";
 import {
   setupFakeAgentEnv,
@@ -398,5 +402,101 @@ describe("UniversalAgent.execute() end-to-end (real provider-routing chain)", ()
     const secondCallText = messagesText(env.provider.calls[1]);
     expect(secondCallText).not.toContain("Tool not found");
     expect(secondCallText).not.toContain("Tool execution failed");
+  });
+});
+
+// Real end-to-end coverage for the RollbackManager wiring: drives a real
+// file_write followed by a real file_restore tool call, both parsed from
+// actual LLM output through the full agent loop, not called directly on
+// the tool handler. The singleton RollbackManager is explicitly reset and
+// re-seeded at a temp root for every test here — file_write's snapshot()
+// call would otherwise land in THIS repo's own real .claude/rollback-backups
+// the moment a test overwrites a file that already exists.
+describe("UniversalAgent.execute() — file_restore end-to-end (rollback safety net)", () => {
+  let env: FakeAgentEnv;
+  let writeDir: string;
+
+  afterEach(() => {
+    env?.cleanup();
+    vi.restoreAllMocks();
+    resetRollbackManager();
+    if (writeDir) rmSync(writeDir, { recursive: true, force: true });
+  });
+
+  it("undoes a real file_write tool call via a real file_restore tool call", async () => {
+    vi.spyOn(inquirer, "prompt").mockResolvedValue({ permission: "yes" });
+    writeDir = mkdtempSync(join(tmpdir(), "agent-e2e-rollback-"));
+    resetRollbackManager();
+    getRollbackManager(writeDir);
+
+    // .txt deliberately — a .json/.ts/etc extension would run through
+    // fileWrite's post-write `npx prettier --write`, which would make an
+    // exact-content assertion flaky/slow for no reason relevant to what
+    // this test is actually verifying (the rollback wiring).
+    const path = join(writeDir, "config.txt");
+    const { writeFileSync, readFileSync } = await import("fs");
+    writeFileSync(path, "version=1");
+
+    env = setupFakeAgentEnv([
+      scriptedResult(JSON.stringify({ tool: "file_write", params: { path, content: "version=corrupted" } })),
+      scriptedResult(JSON.stringify({ tool: "file_restore", params: { path } })),
+      scriptedResult("Restored the original config."),
+    ]);
+
+    const agent = new UniversalAgent("code");
+    const result = await agent.execute(makeTask("update then undo the config file"));
+
+    expect(result.success).toBe(true);
+    expect(readFileSync(path, "utf-8")).toBe("version=1");
+
+    const thirdCallText = messagesText(env.provider.calls[2]);
+    expect(thirdCallText).toContain("```result");
+    expect(thirdCallText).toContain("file_restore");
+    expect(thirdCallText).toContain('"success": true');
+  });
+
+  it("a real file_restore call for a never-touched path reports failure through the real loop", async () => {
+    vi.spyOn(inquirer, "prompt").mockResolvedValue({ permission: "yes" });
+    writeDir = mkdtempSync(join(tmpdir(), "agent-e2e-rollback-"));
+    resetRollbackManager();
+    getRollbackManager(writeDir);
+
+    const path = join(writeDir, "never-written.txt");
+
+    env = setupFakeAgentEnv([
+      scriptedResult(JSON.stringify({ tool: "file_restore", params: { path } })),
+      scriptedResult("No backup existed, nothing to undo."),
+    ]);
+
+    const agent = new UniversalAgent("code");
+    const result = await agent.execute(makeTask("undo a file that was never touched"));
+
+    expect(result.success).toBe(true);
+    const secondCallText = messagesText(env.provider.calls[1]);
+    expect(secondCallText).toContain("No backup found");
+  });
+
+  it("file_restore is unavailable to a review-mode agent (not in its tool set)", async () => {
+    writeDir = mkdtempSync(join(tmpdir(), "agent-e2e-rollback-"));
+    resetRollbackManager();
+    getRollbackManager(writeDir);
+
+    const path = join(writeDir, "x.txt");
+
+    env = setupFakeAgentEnv([
+      scriptedResult(JSON.stringify({ tool: "file_restore", params: { path } })),
+      scriptedResult("Can't restore files in review mode."),
+    ]);
+
+    const agent = new UniversalAgent("review");
+    const result = await agent.execute(makeTask("review this code"));
+
+    expect(result.success).toBe(true);
+    // Filtered out at the parsing layer (review mode has no file_restore
+    // registered), same as any other tool not in the current mode's set —
+    // never reaches executeTool() at all.
+    expect(env.provider.calls.length).toBe(2);
+    const secondCallText = messagesText(env.provider.calls[1]);
+    expect(secondCallText).not.toContain("```result");
   });
 });

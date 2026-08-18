@@ -189,6 +189,11 @@ export class PermissionSystem {
         description: "Delete files",
       },
       {
+        pattern: /^file_restore$/,
+        level: "prompt",
+        description: "Restore a file from its pre-write backup",
+      },
+      {
         pattern: /^file_exists$/,
         level: "allow",
         description: "Check if a file or directory exists",
@@ -352,6 +357,8 @@ export class PermissionSystem {
         return `Read ${formatPath(params.path)}`;
       case "file_delete":
         return `Delete ${formatPath(params.path)}`;
+      case "file_restore":
+        return `Restore ${formatPath(params.path)} from backup`;
       case "directory_create":
         return `Create directory ${formatPath(params.path)}`;
       case "shell_exec":

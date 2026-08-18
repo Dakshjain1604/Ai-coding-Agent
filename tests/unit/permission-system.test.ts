@@ -92,6 +92,25 @@ describe("Shell command prefix rules", () => {
   });
 });
 
+// Regression coverage for the rollback-safety-net phase: file_restore
+// mutates a real file just like file_write/file_delete do (it overwrites
+// or recreates it from a backup), so it must be gated the same way —
+// never silently "allow" just because it's framed as an undo.
+describe("file_restore permission rule", () => {
+  const ps = new PermissionSystem(mkdtempSync(join(tmpdir(), "perm-test-")));
+
+  it("requires a prompt for file_restore, same as file_write/file_delete", () => {
+    const check = ps.checkPermission("file_restore", { path: "/tmp/whatever.txt" });
+    expect(check.allowed).toBe(false);
+    expect(check.requiresPrompt).toBe(true);
+  });
+
+  it("builds a description mentioning restore-from-backup, not a generic write", () => {
+    const check = ps.checkPermission("file_restore", { path: "/tmp/whatever.txt" });
+    expect(check.description.toLowerCase()).toContain("restore");
+  });
+});
+
 describe("Persisted permission grants", () => {
   let dir: string;
 
