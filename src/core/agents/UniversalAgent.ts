@@ -40,6 +40,8 @@ import type {
 } from "../../providers/ProviderInterface.js";
 import { pushSubagentContext, popSubagentContext } from "./subagent-context.js";
 import { createContextEpoch, checkContextDrift, type ContextEpoch } from "./ContextEpoch.js";
+import type { AgentContext } from "./BaseAgent.js";
+import { classifyFailure } from "./failure-classifier.js";
 
 /**
  * Builds the per-task system prompt: mode instructions + output-dir
@@ -269,62 +271,46 @@ export class UniversalAgent extends BaseAgent {
               break;
             } catch (err) {
               retries++;
+              const classified = classifyFailure(err);
               this.logger.debug(
-                `LLM call failed (attempt ${retries}/${maxRetries}): ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+                `LLM call failed (attempt ${retries}/${maxRetries}, category=${classified.category}, retryable=${classified.retryable}): ${classified.reason} — ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
               );
 
-              if (retries >= maxRetries && !hasFallenBack) {
+              const exhausted = retries >= maxRetries;
+              const nonRetryable = !classified.retryable;
+              // Only worth trying a different provider if switching
+              // plausibly helps (shouldChangeStrategy) or we've exhausted
+              // retries on an otherwise-retryable error (where a
+              // different provider is a reasonable last resort even
+              // without an explicit signal). A category like
+              // internal_error is deliberately neither retryable NOR
+              // shouldChangeStrategy — a bug in our own request-building
+              // code fails identically on any provider, so no fallback
+              // attempt should be wasted on it either.
+              const worthTryingFallback =
+                (classified.shouldChangeStrategy || exhausted) && !hasFallenBack;
+
+              if (worthTryingFallback) {
                 hasFallenBack = true;
-                try {
-                  console.log(
-                    chalk.yellow(
-                      `\nAll retries failed for ${context.provider.getType()}. Attempting dynamic fallback...`,
-                    ),
-                  );
-                  // Reuse the shared, already-configured router singleton
-                  // (set up in BaseAgent.initializeContext()) rather than a
-                  // bare `new ModelRouter()`, which would silently ignore
-                  // the user's preferLocal/fallbackToPaid config.
-                  const router = getModelRouter();
-                  const tokens = this.estimateTokenCount(context.messages);
-                  // Exclude the provider that just failed — isAvailable()
-                  // caches its result for the process lifetime, so without
-                  // this, route() would just re-select the same provider
-                  // that exhausted its retries.
-                  const routing = await router.route(
-                    this.getTaskCategory(),
-                    tokens,
-                    { exclude: [context.provider.getType()] },
-                  );
-                  context.provider = routing.provider;
-                  context.model = routing.model;
-                  console.log(
-                    chalk.green(
-                      `Switched to ${context.provider.getType()}/${context.model}. Retrying...`,
-                    ),
-                  );
+                console.log(
+                  chalk.yellow(
+                    `\n${nonRetryable ? `Non-retryable error (${classified.category})` : "All retries failed"} for ${context.provider.getType()}. Attempting dynamic fallback...`,
+                  ),
+                );
+                if (await this.attemptDynamicFallback(context)) {
                   retries = 0;
                   continue;
-                } catch (fallbackErr) {
-                  // No other provider available either (e.g. only one API
-                  // key configured) — fall through and surface the
-                  // original LLM error below, not this routing error.
-                  this.logger.debug(
-                    `Dynamic fallback found no alternate provider: ${
-                      fallbackErr instanceof Error
-                        ? fallbackErr.message
-                        : String(fallbackErr)
-                    }`,
-                  );
                 }
               }
 
-              if (retries >= maxRetries) throw err;
+              // Either non-retryable with no (useful) fallback available,
+              // or retryable but out of both retries and fallback options.
+              if (nonRetryable || exhausted) throw err;
 
               const delayMs = Math.pow(2, retries) * 1000;
               console.log(
                 chalk.yellow(
-                  `LLM call encountered an error. Retrying in ${delayMs}ms... (Attempt ${retries}/${maxRetries})`,
+                  `LLM call encountered an error (${classified.category}). Retrying in ${delayMs}ms... (Attempt ${retries}/${maxRetries})`,
                 ),
               );
               await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -533,6 +519,47 @@ export class UniversalAgent extends BaseAgent {
       }
     } finally {
       popSubagentContext();
+    }
+  }
+
+  /**
+   * Attempts to re-route context.provider/context.model to a different
+   * provider, excluding the one that just failed. Returns true if a
+   * different provider was actually found and switched to, false if none
+   * was available (e.g. only one API key configured) — the caller decides
+   * what to do next (retry fresh vs. give up) based on that.
+   */
+  private async attemptDynamicFallback(context: AgentContext): Promise<boolean> {
+    try {
+      // Reuse the shared, already-configured router singleton (set up in
+      // BaseAgent.initializeContext()) rather than a bare `new
+      // ModelRouter()`, which would silently ignore the user's
+      // preferLocal/fallbackToPaid config.
+      const router = getModelRouter();
+      const tokens = this.estimateTokenCount(context.messages);
+      // Exclude the provider that just failed — isAvailable() caches its
+      // result for the process lifetime, so without this, route() would
+      // just re-select the same provider that just failed.
+      const routing = await router.route(this.getTaskCategory(), tokens, {
+        exclude: [context.provider.getType()],
+      });
+      context.provider = routing.provider;
+      context.model = routing.model;
+      console.log(
+        chalk.green(
+          `Switched to ${context.provider.getType()}/${context.model}. Retrying...`,
+        ),
+      );
+      return true;
+    } catch (fallbackErr) {
+      // No other provider available either — the caller surfaces the
+      // original LLM error, not this routing error.
+      this.logger.debug(
+        `Dynamic fallback found no alternate provider: ${
+          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+        }`,
+      );
+      return false;
     }
   }
 
