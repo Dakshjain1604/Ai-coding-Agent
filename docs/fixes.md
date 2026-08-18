@@ -23,6 +23,16 @@
 - **Two more bugs caught by writing real round-trip tests.** `SQLiteStore.storeMemory()` always minted its own fresh ID, discarding whatever ID the caller already had — entries were unretrievable by the ID `store()` returned. `cleanup()` compared ISO-8601 timestamps against SQLite's differently-formatted `CURRENT_TIMESTAMP`, so expired entries were never actually purged.
 - **Task risk scoring.** Added `task.risk`, scored independently from complexity (a one-line destructive task and a large harmless refactor land on opposite ends — conflating them would misfire on exactly the cases that matter). Permission prompts now show why a task was flagged risky; `workspace_verify` runs lint for high-risk tasks (also fixed a shared-flag bug where one failing check could misreport unrelated passing checks).
 
-## Known limitation (not fixed, flagged)
+## Robustness test battery (tool-parser + full agent loop)
 
-Retry loop does 3 blind exponential-backoff retries even on non-retryable errors (e.g. 413 payload-too-large), which can never succeed without a smaller request. Proper fix needs structured status codes threaded through each provider's error wrapping — separate work, not done here.
+Built a shared `FakeProvider` harness (`tests/helpers/agent-test-harness.ts`) that seeds the real `ProviderFactory`/`ModelRouter` chain so tests drive `UniversalAgent.execute()` through its actual production path. 69 independently-designed tests (not retrofitted to existing behavior) found 5 real bugs:
+
+- **Stale `KNOWN_TOOLS` list** in `tool-parser.ts` — missing most real tools, included some that never existed. Now threads the agent's actual registered tool names through instead.
+- **Two of four parser strategies had no tool-name validation at all** — an ordinary bare-fenced code block with a one-word first line was silently treated as a bogus tool call. Gated all four strategies uniformly.
+- **`parseJsonObject`'s regex truncated at the first closing brace** — broke on any nested params object, i.e. almost every real tool call (`{"tool": X, "params": {...}}` is already nested). Replaced with a brace-balanced scanner. This had been silently broken the whole time — an earlier test suite's assertion coincidentally passed either way, masking it.
+- **`UniversalAgent.execute()` silently discarded the mode passed to its constructor** unless the task also carried `metadata.mode` — broke `spawn_subagent` entirely, since `ParallelOrchestrator` builds each pipeline step with an explicit mode but subtasks don't carry that metadata field.
+- **Duplicate `startConversation()` call** orphaning a conversation row per task (the cause of the real `.claude/memory.db`'s 26-conversations/0-turns state).
+
+## Phase 3: Failure classification (architecture-optimal.md item 18)
+
+Resolves the "known limitation" below. New `src/core/agents/failure-classifier.ts` — classifies caught LLM-call errors (structured status code when available, message-pattern matching otherwise) so the retry loop can tell a transient failure (429/5xx/network — worth a backoff retry) from one that will never succeed on retry (413/401/400/404 — skip straight to a bounded provider-fallback attempt) from a local bug (TypeError/etc. — neither retry nor fallback helps, fail fast). Live-verified: the same task that used to waste ~6s of blind backoff on a 413 now fails in ~650ms. 112 independently-designed tests (98 unit + 14 integration) — writing them caught a bug in the integration itself: the classifier's `shouldChangeStrategy` field was defined but never actually checked, only `retryable` was, so internal errors were still triggering a wasted fallback attempt.
