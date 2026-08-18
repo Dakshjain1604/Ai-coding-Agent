@@ -3,17 +3,12 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import type {
-  CompletionOptions,
-  StreamChunk,
-  ProviderType,
-} from "../utils/types.js";
+import type { CompletionOptions, StreamChunk } from "../utils/types.js";
 import {
   BaseProvider,
   type ChatMessage,
   type ContentBlock,
   type CompletionResult,
-  type UsageStats,
   type ProviderCapabilities,
 } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";

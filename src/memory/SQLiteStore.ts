@@ -19,7 +19,6 @@ import type {
   PatternRecord,
   SQLiteConfig,
 } from './types.js';
-import { MemoryError } from '../utils/types.js';
 
 /**
  * SQLite Store

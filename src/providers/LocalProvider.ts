@@ -10,7 +10,6 @@ import {
   type ChatMessage,
   type ContentBlock,
   type CompletionResult,
-  type UsageStats,
   type ProviderCapabilities,
 } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";

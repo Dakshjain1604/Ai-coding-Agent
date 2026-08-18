@@ -3,16 +3,11 @@
  * HuggingFace offers free inference endpoints
  */
 
-import type {
-  CompletionOptions,
-  StreamChunk,
-  ProviderType,
-} from "../utils/types.js";
+import type { CompletionOptions, StreamChunk } from "../utils/types.js";
 import {
   BaseProvider,
   type ChatMessage,
   type CompletionResult,
-  type UsageStats,
   type ProviderCapabilities,
 } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";

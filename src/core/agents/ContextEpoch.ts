@@ -17,7 +17,7 @@
 
 import { exec } from "child_process";
 import { promisify } from "util";
-import { existsSync, readFileSync, statSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { v4 as uuid } from "uuid";
 
