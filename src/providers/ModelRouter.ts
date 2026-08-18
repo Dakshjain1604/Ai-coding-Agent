@@ -38,6 +38,13 @@ export interface RoutingConfig {
   customRules: RoutingRule[];
 }
 
+/** Providers billed per-token — matches canMakePaidCall()'s own counting. */
+const PAID_PROVIDER_TYPES: ReadonlySet<ProviderType> = new Set([
+  "claude",
+  "openai",
+  "gemini",
+]);
+
 /**
  * Default routing rules when local-first is disabled.
  * Priority: OpenRouter (stepfun free model) -> Groq -> paid fallbacks.
@@ -243,7 +250,10 @@ export class ModelRouter {
       exclude?: ProviderType[];
     },
   ): Promise<RoutingResult> {
-    // Check for custom rule first
+    // Check for custom rule first — but only actually use it if it doesn't
+    // route to a paid provider we're out of budget for; canMakePaidCall()/
+    // recordCall() used to have zero callers anywhere, so maxPaidApiCalls
+    // never actually capped anything regardless of what a user configured.
     const customRule = this.config.customRules.find(
       (r) => r.taskCategory === taskCategory,
     );
@@ -253,7 +263,13 @@ export class ModelRouter {
       customRule.model &&
       !options?.exclude?.includes(customRule.provider)
     ) {
-      return this.routeToRule(customRule, estimatedTokens);
+      const resolvedCustomProvider = this.resolveProvider(customRule.provider);
+      if (!this.isPaidProvider(resolvedCustomProvider) || this.canMakePaidCall()) {
+        return this.routeToRule(customRule, estimatedTokens);
+      }
+      this.logger.debug(
+        `Custom rule for ${taskCategory} skipped: paid API call limit reached for ${resolvedCustomProvider}`,
+      );
     }
 
     // Check default rules (local-first or cloud-first, per this.config.preferLocal)
@@ -262,6 +278,14 @@ export class ModelRouter {
     );
     if (defaultRule && !options?.exclude?.includes(defaultRule.provider!)) {
       const providerType = this.resolveProvider(defaultRule.provider!);
+
+      if (this.isPaidProvider(providerType) && !this.canMakePaidCall()) {
+        return this.routeToFallback(
+          taskCategory,
+          estimatedTokens,
+          options?.exclude,
+        );
+      }
 
       // Check if provider is available
       const available = await this.factory.isAvailable(providerType);
@@ -283,6 +307,7 @@ export class ModelRouter {
           ? this.getFasterModel(taskCategory, providerType)
           : model;
 
+      this.recordCall(providerType);
       return {
         provider,
         model: finalModel,
@@ -401,6 +426,7 @@ export class ModelRouter {
     const provider = await this.factory.get(providerType);
     const model = rule.model!;
 
+    this.recordCall(providerType);
     return {
       provider,
       model,
@@ -426,6 +452,12 @@ export class ModelRouter {
 
     for (const providerType of fallbackOrder) {
       if (exclude?.includes(providerType)) continue;
+      if (this.isPaidProvider(providerType) && !this.canMakePaidCall()) {
+        this.logger.debug(
+          `${providerType} skipped: paid API call limit reached`,
+        );
+        continue;
+      }
       try {
         const isAvail = await this.factory.isAvailable(providerType);
         if (!isAvail) {
@@ -441,6 +473,7 @@ export class ModelRouter {
 
         console.log(chalk.gray(`  • Falling back to ${providerType}...`));
 
+        this.recordCall(providerType);
         return {
           provider,
           model,
@@ -477,6 +510,10 @@ export class ModelRouter {
   private resolveProvider(type: ProviderType): ProviderType {
     // 'ollama' is an alias for 'local'
     return type === "ollama" ? "local" : type;
+  }
+
+  private isPaidProvider(type: ProviderType): boolean {
+    return PAID_PROVIDER_TYPES.has(type);
   }
 
   /**
