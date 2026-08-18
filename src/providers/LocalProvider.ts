@@ -3,8 +3,8 @@
  * Free, local-first option using Ollama or LM Studio
  */
 
-import ollama from "ollama";
-import type { CompletionOptions, StreamChunk } from "../utils/types.js";
+import ollama, { type Tool as OllamaTool } from "ollama";
+import type { CompletionOptions, StreamChunk, ToolCall } from "../utils/types.js";
 import {
   BaseProvider,
   type ChatMessage,
@@ -55,7 +55,10 @@ export class LocalProvider extends BaseProvider {
     return {
       streaming: true,
       embeddings: true,
-      functionCalling: false, // Depends on model
+      // Ollama supports native tool calling (complete() now forwards
+      // options.tools and parses message.tool_calls); LM Studio's
+      // OpenAI-compatible endpoint isn't wired up for it here.
+      functionCalling: this.provider === "ollama",
       vision: false, // Depends on model
       maxContextLength: 32000, // Model dependent
       supportedModels: [], // Discovered dynamically
@@ -73,9 +76,37 @@ export class LocalProvider extends BaseProvider {
 
     try {
       if (this.provider === "ollama") {
+        // Ollama supports native tool calling (confirmed against the
+        // installed client's own types: ChatRequest.tools / Message.
+        // tool_calls) — this used to never be forwarded at all, silently
+        // discarding the `tools` UniversalAgent's callLLM() already
+        // builds and passes through CompletionOptions on every call.
+        // UniversalAgent.execute() explicitly PREFERS native toolCalls
+        // over its own text-based ```tool block parser when present (see
+        // "Prefer native tool calls, fallback to text parser if empty"),
+        // so this provider — the project's own default, local-first one —
+        // was forced onto the strictly more fragile text-parsing path for
+        // every single local/Ollama-routed task, never the reliable path
+        // every other capable provider gets to use.
+        // ToolSchema's JSON-schema `properties` is typed as
+        // Record<string, unknown> in this codebase (it's built generically
+        // across all providers), which is structurally looser than
+        // Ollama's own client typing for the same JSON-schema shape at
+        // runtime — the cast reflects a real type-system impedance
+        // mismatch at this API boundary, not an unverified assumption.
+        const ollamaTools: OllamaTool[] | undefined = options?.tools?.map((t) => ({
+          type: "function",
+          function: {
+            name: t.name,
+            description: t.description,
+            parameters: t.parameters as unknown as OllamaTool["function"]["parameters"],
+          },
+        }));
+
         const response = await ollama.chat({
           model,
           messages: this.convertMessages(messages),
+          tools: ollamaTools && ollamaTools.length > 0 ? ollamaTools : undefined,
           options: {
             num_predict: maxTokens,
             temperature: options?.temperature,
@@ -83,6 +114,15 @@ export class LocalProvider extends BaseProvider {
             stop: options?.stopSequences,
           },
         });
+
+        let toolCalls: ToolCall[] | undefined;
+        const rawToolCalls = response.message.tool_calls;
+        if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+          toolCalls = rawToolCalls.map((tc) => ({
+            name: tc.function.name,
+            params: tc.function.arguments,
+          }));
+        }
 
         return {
           content: response.message.content,
@@ -93,7 +133,8 @@ export class LocalProvider extends BaseProvider {
               (response.prompt_eval_count ?? 0) + (response.eval_count ?? 0),
           },
           model,
-          finishReason: "stop",
+          finishReason: toolCalls ? "tool_calls" : "stop",
+          toolCalls,
         };
       }
 
