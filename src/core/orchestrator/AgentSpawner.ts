@@ -39,6 +39,20 @@ export interface SpawnOptions {
  * Agent Spawner
  * Manages agent creation and lifecycle with system-aware configuration
  */
+/**
+ * How many finished (completed/failed) agents to retain for introspection
+ * (getSpawned/getAllSpawned/getSpawnedByStatus) after they're done.
+ * Without a cap, every task ever run through spawn()+execute() — each
+ * holding a full BaseAgent instance plus its conversation history — stays
+ * in `agents` for the lifetime of the process. For a one-shot CLI
+ * invocation that's harmless (the process exits immediately), but
+ * interactive mode spawns one agent per user turn through this exact
+ * singleton and never calls destroy() — a long interactive session leaks
+ * an unbounded number of full agent instances. Never evicts a
+ * running/pending agent, only the oldest already-finished ones.
+ */
+const MAX_RETAINED_FINISHED_AGENTS = 20;
+
 export class AgentSpawner {
   private agents: Map<string, SpawnedAgent> = new Map();
   private agentFactories: Map<AgentType, () => Promise<BaseAgent>>;
@@ -163,6 +177,26 @@ export class AgentSpawner {
 
       this.logger.agentError(spawned.type, spawned.task.id, err);
       return result;
+    } finally {
+      this.pruneFinishedAgents();
+    }
+  }
+
+  /**
+   * Evicts the oldest finished (completed/failed) agents once their count
+   * exceeds MAX_RETAINED_FINISHED_AGENTS. Running/pending agents are never
+   * touched. Called after every execute() — cheap (O(n log n) over a
+   * bounded, small `agents` map) and keeps the bound tight regardless of
+   * how many tasks a long-lived process (interactive mode) runs.
+   */
+  private pruneFinishedAgents(): void {
+    const finished = this.getAllSpawned()
+      .filter((a) => a.status === "completed" || a.status === "failed")
+      .sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
+
+    const excess = finished.length - MAX_RETAINED_FINISHED_AGENTS;
+    for (let i = 0; i < excess; i++) {
+      this.agents.delete(finished[i].id);
     }
   }
 
@@ -219,13 +253,19 @@ export class AgentSpawner {
 
     for (const mode of agentModes) {
       this.agentFactories.set(mode, async () => {
-        const agent = new UniversalAgent();
-        if (mode === "orchestrator") {
-          agent.setMode("plan");
-        } else if (mode !== "code") {
-          agent.setMode(mode as "debug" | "test" | "review" | "plan");
-        }
-        return agent;
+        // Passing the mode directly to the constructor (rather than
+        // constructing bare and calling setMode() afterward) is load-
+        // bearing, not stylistic: only the constructor sets
+        // modeExplicitlySet = true. Without it, UniversalAgent.execute()
+        // treats the agent as never having been pinned to a mode, and
+        // silently RE-DETECTS the mode from task.description the moment
+        // task.metadata.mode isn't set — which none of run/debug/test/
+        // review/simplify ever set. Confirmed live: spawning via
+        // AgentSpawner("debug", ...) with a description worded like a
+        // review request silently executed in "review" mode instead —
+        // the dedicated `debug`/`test`/`review` CLI commands were not
+        // reliably running in the mode they were explicitly invoked for.
+        return new UniversalAgent(mode === "orchestrator" ? "plan" : mode);
       });
     }
   }
@@ -340,7 +380,10 @@ export async function executeTask(task: Task): Promise<TaskResult> {
     agentType = analysis.suggestedStrategy.agents[0];
   }
 
-  // Spawn and execute
+  // Spawn and execute — getSpawnOptions() clamps the timeout/parallelism
+  // to what the system can actually handle right now (e.g. a shorter
+  // timeout under high load) instead of every task always getting the
+  // same fixed default regardless of system state.
   const spawned = await spawner.spawn(agentType, task);
-  return spawner.execute(spawned.id);
+  return spawner.execute(spawned.id, spawner.getSpawnOptions());
 }

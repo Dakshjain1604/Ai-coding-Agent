@@ -572,7 +572,7 @@ export class InteractiveMode {
     try {
       const spawner = getAgentSpawner();
       const spawned = await spawner.spawn(agentType, task);
-      const result = await spawner.execute(spawned.id);
+      const result = await spawner.execute(spawned.id, spawner.getSpawnOptions());
       this.displayResult(result);
 
       taskManager.completeTask(
