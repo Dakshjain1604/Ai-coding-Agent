@@ -695,11 +695,21 @@ export abstract class BaseAgent {
     let toolError: string | undefined;
     let toolResultValue: unknown;
 
+    // Counts every ATTEMPT against the budget, not just successes — used
+    // to only increment in the try block's success path, so a tool that
+    // kept failing (wrong params, a transient error, etc.) never counted
+    // against maxToolCalls at all. A single LLM turn can contain many
+    // tool calls (UniversalAgent's loop processes them in a plain
+    // sequential for-of, not one-per-iteration), so maxIterations alone
+    // doesn't reliably bound total tool-call attempts either — an agent
+    // stuck repeatedly failing the same call could make far more actual
+    // attempts than maxToolCalls implies while the counter stayed at 0.
+    this.toolCallCount++;
+
     try {
       const rawResult = await tool.execute(effectiveParams);
       const result = this.scrubToolResult(rawResult);
       toolResultValue = result;
-      this.toolCallCount++;
       this.context?.toolResults.set(`${name}_${Date.now()}`, result);
       return result;
     } catch (err) {
