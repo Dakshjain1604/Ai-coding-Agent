@@ -13,7 +13,7 @@ import {
   unlinkSync,
   rmSync,
 } from "fs";
-import { join, dirname, basename, extname, relative, resolve } from "path";
+import { join, dirname, basename } from "path";
 import { exec, execFile } from "child_process";
 import { promisify } from "util";
 import { getToolRegistry } from "./ToolRegistry.js";
@@ -27,6 +27,7 @@ import { getLogger } from "../../utils/logger.js";
 import { formatFile } from "../../utils/formatter.js";
 import { getDependencyGraph } from "../../utils/dependency-graph.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
+import type { MemoryType } from "../../memory/types.js";
 import { getRollbackManager } from "../../utils/git-rollback.js";
 
 const execAsync = promisify(exec);
@@ -86,11 +87,22 @@ export const fileRead: ToolDefinition = {
 
       const content = readFileSync(path, encoding);
 
-      if (params.offset || params.limit) {
+      // offset is documented as a "line number" (1-indexed, matching the
+      // Read tool convention this mirrors) — passing offset:1 means "start
+      // at the first line". Used to be a raw 0-indexed slice() start, so
+      // offset:1 actually skipped the first line and started at the
+      // second. Also used `params.offset || params.limit` to decide
+      // whether to slice at all — 0 is falsy in JS, so an explicit
+      // `offset: 0` with no limit fell through to "return the whole file"
+      // instead of being treated as an (out-of-range, but explicit) offset.
+      const hasOffset = params.offset !== undefined && params.offset !== null;
+      const hasLimit = params.limit !== undefined && params.limit !== null;
+      if (hasOffset || hasLimit) {
         const lines = content.split("\n");
-        const offset = (params.offset as number) ?? 0;
-        const limit = (params.limit as number) ?? lines.length;
-        const selected = lines.slice(offset, offset + limit);
+        const lineNumber = hasOffset ? (params.offset as number) : 1;
+        const startIndex = Math.max(0, lineNumber - 1);
+        const limit = hasLimit ? (params.limit as number) : lines.length;
+        const selected = lines.slice(startIndex, startIndex + limit);
         return { success: true, output: selected.join("\n") };
       }
 
@@ -215,7 +227,11 @@ export const fileDelete: ToolDefinition = {
 
       const stats = statSync(path);
       if (stats.isDirectory()) {
-        if (recursive) {
+        // Used to reject EVERY directory without recursive:true, including
+        // genuinely empty ones — despite the error message specifically
+        // saying "non-empty", implying emptiness was the deciding factor
+        // when it never actually was.
+        if (recursive || readdirSync(path).length === 0) {
           rmSync(path, { recursive: true });
         } else {
           return {
@@ -706,9 +722,15 @@ export const memoryStore: ToolDefinition = {
     value: { type: "string", description: "Value to store", required: true },
     type: {
       type: "string",
-      description: "Memory type (pattern, decision, preference)",
+      // Used to only document 3 of the real 6 MemoryType values and had
+      // no enum constraint at all, so ToolRegistry.validateParameters()
+      // couldn't catch a typo'd/invalid type before it reached
+      // memory.store() (which took it via an unchecked `as any` cast).
+      description:
+        "Memory type (pattern, decision, preference, conversation, execution, plan)",
       required: false,
       default: "pattern",
+      enum: ["pattern", "decision", "preference", "conversation", "execution", "plan"],
     },
   },
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
@@ -719,7 +741,7 @@ export const memoryStore: ToolDefinition = {
       const value = params.value as string;
       const type = (params.type as string) ?? "pattern";
 
-      await memory.store(type as any, `${key}: ${value}`, { key });
+      await memory.store(type as MemoryType, `${key}: ${value}`, { key });
 
       return { success: true, output: `Stored: ${key}` };
     } catch (error) {

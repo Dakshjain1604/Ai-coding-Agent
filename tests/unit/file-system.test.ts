@@ -143,6 +143,31 @@ describe("builtin fileWrite/fileDelete — RollbackManager wiring", () => {
       expect(result.output).toContain("not found");
     });
 
+    it("deletes an empty directory even without recursive:true (the error-message-vs-behavior fix)", async () => {
+      // The error message specifically says "non-empty directory",
+      // implying emptiness was the deciding factor — but it used to reject
+      // EVERY directory (empty or not) without recursive:true regardless.
+      const emptySubdir = join(dir, "empty-sub");
+      const { mkdirSync } = await import("fs");
+      mkdirSync(emptySubdir);
+
+      const result = await fileDelete.handler({ path: emptySubdir });
+      expect(result.success).toBe(true);
+      expect(existsSync(emptySubdir)).toBe(false);
+    });
+
+    it("still refuses a genuinely non-empty directory without recursive:true", async () => {
+      const nonEmptySubdir = join(dir, "non-empty-sub");
+      const { mkdirSync } = await import("fs");
+      mkdirSync(nonEmptySubdir);
+      writeFileSync(join(nonEmptySubdir, "inner.txt"), "content");
+
+      const result = await fileDelete.handler({ path: nonEmptySubdir });
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("non-empty");
+      expect(existsSync(nonEmptySubdir)).toBe(true);
+    });
+
     it("does not snapshot a recursive directory delete (documented limitation)", async () => {
       const subdir = join(dir, "sub");
       const { mkdirSync } = await import("fs");
