@@ -43,6 +43,13 @@ describe("ToolRegistry & Built-in Tools", () => {
     expect(TOOL_SETS.debug).toContain("find_usages");
     expect(TOOL_SETS.review).toContain("analyze_imports");
 
+    // count_lines was fully implemented, registered, and tested, but
+    // appeared in NO mode's TOOL_SETS entry at all — since TOOL_SETS is
+    // a strict whitelist (UniversalAgent.ts/ToolRegistry.ts both use it
+    // that way), it was permanently unreachable by every agent mode.
+    expect(registry.has("count_lines")).toBe(true);
+    expect(TOOL_SETS.review).toContain("count_lines");
+
     const check = getPermissionSystem().checkPermission("search_content", {});
     expect(check.allowed).toBe(true);
 

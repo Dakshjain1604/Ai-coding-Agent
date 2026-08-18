@@ -6,7 +6,13 @@
  * uncaught "toolNames is not iterable" TypeError.
  */
 import { describe, it, expect } from "vitest";
-import { AGENT_MODES, isValidAgentMode } from "../../src/core/agents/system-prompts.js";
+import {
+  AGENT_MODES,
+  isValidAgentMode,
+  SYSTEM_PROMPTS,
+  type AgentMode,
+} from "../../src/core/agents/system-prompts.js";
+import { TOOL_SETS } from "../../src/core/agents/tool-sets.js";
 
 describe("AGENT_MODES", () => {
   it("contains exactly the five real agent modes", () => {
@@ -69,6 +75,23 @@ describe("isValidAgentMode", () => {
 
   it("rejects an array", () => {
     expect(isValidAgentMode(["code"])).toBe(false);
+  });
+
+  // Nothing enforces this structurally — the "Available tools:" line in
+  // each SYSTEM_PROMPTS entry is hand-maintained prose, not derived from
+  // TOOL_SETS. It had drifted badly out of sync (missing whole
+  // categories of real tools per mode) before this test existed. This
+  // doesn't prevent future drift, but it does catch it the moment
+  // someone adds a tool to TOOL_SETS[mode] without mentioning it here.
+  it("SYSTEM_PROMPTS' advisory tool list for each mode mentions every tool actually in that mode's TOOL_SETS", () => {
+    for (const mode of AGENT_MODES) {
+      for (const toolName of TOOL_SETS[mode as AgentMode]) {
+        expect(
+          SYSTEM_PROMPTS[mode as AgentMode],
+          `SYSTEM_PROMPTS.${mode} does not mention "${toolName}", which is in TOOL_SETS.${mode}`,
+        ).toContain(toolName);
+      }
+    }
   });
 
   it("narrows the TypeScript type on true (compile-time check via usage, not a runtime assertion)", () => {

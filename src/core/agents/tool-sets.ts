@@ -68,6 +68,12 @@ export const TOOL_SETS: Record<AgentMode, string[]> = {
     "find_usages",
     "analyze_imports",
     "analyze_exports",
+    // count_lines used to be in no mode's list at all — TOOL_SETS is a
+    // strict whitelist (see UniversalAgent.ts/ToolRegistry.ts), so a
+    // fully implemented, registered, tested tool was permanently
+    // unreachable by every agent mode. Placed alongside its sibling
+    // passive-analysis tools here.
+    "count_lines",
     "git_status",
     "git_diff",
     "workspace_verify",

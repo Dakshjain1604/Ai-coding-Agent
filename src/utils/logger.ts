@@ -105,6 +105,7 @@ export class Logger {
   }
 
   success(message: string): void {
+    if (!this.shouldLog("info")) return;
     const formatted = this.colorize
       ? chalk.green("✓ ") + message
       : `✓ ${message}`;
@@ -112,6 +113,7 @@ export class Logger {
   }
 
   fail(message: string): void {
+    if (!this.shouldLog("error")) return;
     const formatted = this.colorize
       ? chalk.red("✗ ") + message
       : `✗ ${message}`;

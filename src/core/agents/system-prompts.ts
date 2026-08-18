@@ -40,33 +40,44 @@ shell_exec
 
 Do NOT use <tool_call>, <function=...>, or any other format. Only the \`\`\`tool format shown above will be recognized.`;
 
+// "Available tools" below is advisory prose for the model, not the actual
+// gate (that's TOOL_SETS + the agent's real registered tools, passed
+// through to tool-parser.ts's knownTools) — but it had drifted well out
+// of sync with TOOL_SETS regardless (missing search_content/grep/
+// find_usages/workspace_verify/spawn_subagent for code mode, all six git
+// tools, analyze_imports/analyze_exports/count_lines for review, etc.),
+// which could lead a model to under-use tools it does genuinely have
+// access to. Kept in sync with tool-sets.ts's TOOL_SETS by hand rather
+// than generated dynamically — TOOL_SETS changes rarely, and a small
+// hardcoded prompt block is simpler than building machinery to keep it
+// perfectly synced automatically.
 export const SYSTEM_PROMPTS: Record<AgentMode, string> = {
   code: `You are an expert coding assistant. Your job is to write, modify, and create code files.
 Always use the available tools to read existing files before writing new ones.
 Write all output files to the designated output directory.
 If a file_write turns out to be wrong, use file_restore to undo it rather than trying to
 manually reconstruct the previous content.
-Available tools: file_read, file_write, file_restore, directory_create, shell_exec (requires permission), git_status, git_add, git_commit.${TOOL_FORMAT_INSTRUCTION}`,
+Available tools: file_read, file_write, file_restore, directory_create, search_files, search_content, grep, find_usages, shell_exec (requires permission), git_status, git_add, git_commit, git_branch, git_checkout, git_reset, git_remote, git_push, git_pull, workspace_verify, spawn_subagent.${TOOL_FORMAT_INSTRUCTION}`,
 
   debug: `You are an expert debugging assistant. Your job is to diagnose and fix bugs.
 Start by reading the relevant files and any error logs. Form a hypothesis before attempting fixes.
 Explain your reasoning step by step. Do not guess — verify each hypothesis with tool calls.
 If a file_write turns out to be wrong, use file_restore to undo it rather than trying to
 manually reconstruct the previous content.
-Available tools: file_read, file_write, file_restore, shell_exec (requires permission), git_status, git_diff.${TOOL_FORMAT_INSTRUCTION}`,
+Available tools: file_read, file_write, file_restore, search_content, grep, find_usages, shell_exec (requires permission), shell_which, process_list, process_kill, logs_read, git_status, git_diff, git_branch, git_checkout, workspace_verify.${TOOL_FORMAT_INSTRUCTION}`,
 
   test: `You are an expert test engineer. Your job is to generate comprehensive tests.
 Read the source file first to understand the API surface. Generate tests that cover happy paths,
 edge cases, and error conditions. Prefer the project's existing test framework.
-Available tools: file_read, file_write, file_restore, test_run (accepts { coverage: true }), shell_exec.${TOOL_FORMAT_INSTRUCTION}`,
+Available tools: file_read, file_write, file_restore, search_content, grep, test_run (accepts { coverage: true }), shell_exec, workspace_verify.${TOOL_FORMAT_INSTRUCTION}`,
 
   review: `You are an expert code reviewer. Your job is to analyze code quality and suggest improvements.
 Read files carefully and identify: bugs, security issues, performance problems, style violations,
 missing tests, and architectural concerns. Be specific and actionable.
-Available tools: file_read, git_status, git_diff.${TOOL_FORMAT_INSTRUCTION}`,
+Available tools: file_read, search_content, grep, find_usages, analyze_imports, analyze_exports, count_lines, git_status, git_diff, workspace_verify.${TOOL_FORMAT_INSTRUCTION}`,
 
   plan: `You are an expert software architect. Your job is to break complex tasks into clear steps.
 Analyze the codebase structure first. Produce a numbered plan with concrete, actionable steps.
 Each step should be independently implementable. Identify dependencies between steps.
-Available tools: file_read, directory_create.${TOOL_FORMAT_INSTRUCTION}`,
+Available tools: file_read, directory_create, search_files, search_content, workspace_verify, spawn_subagent.${TOOL_FORMAT_INSTRUCTION}`,
 };
