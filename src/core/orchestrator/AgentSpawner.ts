@@ -8,7 +8,6 @@ import type {
   TaskResult,
   AgentType,
   AgentConfig,
-  AgentState,
 } from "../../utils/types.js";
 import type { BaseAgent } from "../agents/BaseAgent.js";
 import { UniversalAgent } from "../agents/UniversalAgent.js";
@@ -16,6 +15,8 @@ import { getConfigManager } from "../../utils/config.js";
 import { getSystemAnalyzer } from "../../utils/system-analyzer.js";
 import { getTaskManager } from "../../utils/task-manager.js";
 import { getTaskAnalyzer } from "./TaskAnalyzer.js";
+import { getParallelOrchestrator, type SubTaskPlan } from "./ParallelOrchestrator.js";
+import type { AgentMode } from "../agents/system-prompts.js";
 
 export interface SpawnedAgent {
   id: string;
@@ -102,17 +103,25 @@ export class AgentSpawner {
     // (e.g. AgentSpawner used directly, bypassing interactive.ts). Not
     // assigned to a variable — nothing here needs the returned instance.
     getTaskManager();
+    // Used to fetch systemCaps here and then never use it — the capacity
+    // check below used this.maxParallel alone, a value fixed once at
+    // construction time. If system load changes after construction (the
+    // whole reason getSpawnOptions() re-checks this live on every
+    // execute() call, per the identical Math.min pattern there), spawn()
+    // itself still gated on the stale number. Effective limit is now the
+    // tighter of the two, matching getSpawnOptions().
     const systemCaps = getSystemAnalyzer().analyze();
+    const effectiveMaxParallel = Math.min(this.maxParallel, systemCaps.recommendedMaxAgents);
 
     const currentAgents = this.getAllSpawned().filter(
       (a) => a.status === "running",
     ).length;
-    if (currentAgents >= this.maxParallel) {
+    if (currentAgents >= effectiveMaxParallel) {
       this.logger.warn(
-        `System at capacity: ${currentAgents}/${this.maxParallel} agents running`,
+        `System at capacity: ${currentAgents}/${effectiveMaxParallel} agents running`,
       );
       throw new Error(
-        `System at capacity. Maximum ${this.maxParallel} parallel agents allowed.`,
+        `System at capacity. Maximum ${effectiveMaxParallel} parallel agents allowed.`,
       );
     }
 
@@ -372,6 +381,7 @@ export async function executeTask(task: Task): Promise<TaskResult> {
 
   // Determine agent type based on command in metadata or analysis
   let agentType: AgentType = "code";
+  let commandOverride = false;
 
   if (task.metadata?.command) {
     const commandToAgent: Record<string, AgentType> = {
@@ -381,8 +391,38 @@ export async function executeTask(task: Task): Promise<TaskResult> {
       review: "review",
     };
     agentType = commandToAgent[task.metadata.command as string] || "code";
+    commandOverride = true;
   } else if (analysis.suggestedStrategy.agents.length > 0) {
     agentType = analysis.suggestedStrategy.agents[0];
+  }
+
+  // A 'pipeline'/'parallel' strategy names MULTIPLE stages (e.g.
+  // ['plan', 'code', 'test']) — this used to always take just agents[0]
+  // and run that ONE stage, silently dropping every stage after it, for
+  // every non-'single' task TaskAnalyzer ever suggested. Confirmed live:
+  // a trivial "create a file" task classified as medium complexity got a
+  // ['plan', 'code'] pipeline suggestion, executeTask() spawned only the
+  // 'plan' agent, and since plan mode's tool set has no file_write, the
+  // file was never actually created — the task "succeeded" having done
+  // nothing.
+  //
+  // ParallelOrchestrator.executePipeline() already exists and is already
+  // tested for exactly this (it's what spawn_subagent uses) — wired up
+  // here instead of a bare single-agent spawn whenever there's more than
+  // one real stage to run. A command-metadata override (debug/test/
+  // simplify/review CLI commands) always stays single-agent, matching
+  // its existing, deliberate, already-correct behavior.
+  const strategy = analysis.suggestedStrategy;
+  if (!commandOverride && strategy.mode !== "single" && strategy.agents.length > 1) {
+    const subtasks: SubTaskPlan[] = strategy.agents.map((type) => ({
+      // 'orchestrator' isn't a real AgentMode — UniversalAgent's own
+      // agent-factory registration (registerAgentFactories()) already
+      // maps it to 'plan' for the exact same reason; mirrored here so a
+      // pipeline naming 'orchestrator' as a stage doesn't crash.
+      mode: (type === "orchestrator" ? "plan" : type) as AgentMode,
+      description: task.description,
+    }));
+    return getParallelOrchestrator().executePipeline(task, subtasks, [], 0);
   }
 
   // Spawn and execute — getSpawnOptions() clamps the timeout/parallelism

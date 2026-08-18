@@ -524,4 +524,54 @@ describe("executeTask() — convenience function integration", () => {
     const result = await executeTask(makeTask("do something", { command: "not-a-real-command" }));
     expect(result.agentType).toBe("code");
   });
+
+  // Regression for a live-reproduced bug: TaskAnalyzer suggests multi-
+  // stage 'pipeline'/'parallel' strategies (e.g. ['plan', 'code', 'test'])
+  // for anything above 'simple' complexity, but executeTask() used to
+  // always take just suggestedStrategy.agents[0] and run ONLY that one
+  // stage — silently dropping every stage after it. Confirmed live: a
+  // trivial "create a file" task got classified as medium complexity,
+  // got a pipeline suggestion starting with 'plan', and since plan
+  // mode's tool set has no file_write, the file was never actually
+  // created — the task "succeeded" having done nothing. Fixed by
+  // routing non-'single' strategies with more than one stage through
+  // ParallelOrchestrator.executePipeline() instead.
+  it("runs every stage of a multi-stage strategy, not just the first, for a task with no command override", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Done.")]);
+    // The exact description that triggered this live — real TaskAnalyzer
+    // classification, not a mocked one.
+    const task = makeTask(
+      "Create a file called hello.txt containing exactly the text: hello world",
+    );
+    const result = await executeTask(task);
+    expect(result.success).toBe(true);
+    // ParallelOrchestrator.executePipeline() always reports
+    // agentType:"orchestrator" and joins each stage's own
+    // "[Subtask N PASSED (mode)]: ..." line into its output — a
+    // single-agent run never produces that shape, so this is a
+    // structural signal that more than one stage actually executed.
+    expect(result.agentType).toBe("orchestrator");
+    expect(result.output).toContain("[Subtask 1 PASSED");
+    expect(result.output).toContain("[Subtask 2 PASSED");
+  });
+
+  it("a single-stage ('simple' complexity) task still runs directly through spawn(), not the pipeline path", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Done.")]);
+    const result = await executeTask(makeTask("write a simple hello world function"));
+    expect(result.success).toBe(true);
+    // Single-agent results never have the "[Subtask N PASSED" shape
+    // ParallelOrchestrator produces.
+    expect(result.output).not.toContain("[Subtask");
+  });
+
+  it("a command-metadata override always stays single-agent, even if the description would otherwise suggest a pipeline", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Debugged.")]);
+    const result = await executeTask(
+      makeTask("Create a file called hello.txt containing exactly the text: hello world", {
+        command: "debug",
+      }),
+    );
+    expect(result.agentType).toBe("debug");
+    expect(result.output).not.toContain("[Subtask");
+  });
 });
