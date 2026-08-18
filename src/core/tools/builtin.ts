@@ -14,13 +14,14 @@ import {
   rmSync,
 } from "fs";
 import { join, dirname, basename, extname, relative, resolve } from "path";
-import { execSync, exec } from "child_process";
+import { exec, execFile } from "child_process";
 import { promisify } from "util";
 import { getToolRegistry } from "./ToolRegistry.js";
 import type { ToolDefinition } from "./ToolRegistry.js";
 import type { ToolResult } from "../../utils/types.js";
 import { createCodeSearchTools } from "./code-search.js";
 import { createFileSystemTools } from "./file-system.js";
+import { createGitTools } from "./git-operations.js";
 import { spawnSubagentTool } from "./subagent-tool.js";
 import { getLogger } from "../../utils/logger.js";
 import { formatFile } from "../../utils/formatter.js";
@@ -29,6 +30,20 @@ import { getMemoryManager } from "../../memory/MemoryManager.js";
 import { getRollbackManager } from "../../utils/git-rollback.js";
 
 const execAsync = promisify(exec);
+/**
+ * For every tool below that isn't shell_exec itself (whose whole purpose
+ * IS running an arbitrary command string), user/model-supplied values
+ * (commit messages, file paths, search patterns, etc.) must never be
+ * interpolated into a shell command string — execAsync() runs commands
+ * through `/bin/sh -c "..."`, so a value containing backticks, `$(...)`,
+ * `;`, `&&`, or `|` executes as a SEPARATE command regardless of quoting.
+ * execFile() with an argv array never invokes a shell at all, so this
+ * entire injection class is structurally impossible regardless of what
+ * characters a value contains. Confirmed exploitable pre-fix: a git_commit
+ * call with message `` pwned`touch /tmp/PWNED` `` created a real file on
+ * disk via the OLD execAsync-based implementation.
+ */
+const execFileAsync = promisify(execFile);
 
 // ============================================================================
 // File System Tools
@@ -365,9 +380,8 @@ export const shellWhich: ToolDefinition = {
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
     try {
       const name = params.name as string;
-      const command =
-        process.platform === "win32" ? `where ${name}` : `which ${name}`;
-      const { stdout } = await execAsync(command);
+      const finder = process.platform === "win32" ? "where" : "which";
+      const { stdout } = await execFileAsync(finder, [name]);
       return { success: true, output: stdout.trim() };
     } catch {
       return {
@@ -391,15 +405,22 @@ export const processList: ToolDefinition = {
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
     try {
       const filter = params.filter as string | undefined;
-      const command =
+      const { stdout } =
         process.platform === "win32"
-          ? "tasklist"
-          : filter
-            ? `ps aux | grep ${filter}`
-            : "ps aux";
+          ? await execFileAsync("tasklist")
+          : await execFileAsync("ps", ["aux"]);
 
-      const { stdout } = await execAsync(command);
-      return { success: true, output: stdout };
+      // Filtering happens here, in JS, rather than piping through a
+      // second shelled-out `grep ${filter}` — that used to let a filter
+      // value like "; touch /tmp/x #" run as its own shell command.
+      const output = filter
+        ? stdout
+            .split("\n")
+            .filter((line) => line.toLowerCase().includes(filter.toLowerCase()))
+            .join("\n")
+        : stdout;
+
+      return { success: true, output };
     } catch (error) {
       return {
         success: false,
@@ -459,15 +480,41 @@ export const logsRead: ToolDefinition = {
       const lines = (params.lines as number) ?? 100;
       const filter = params.filter as string | undefined;
 
-      const command =
-        process.platform === "win32"
-          ? `powershell -Command "Get-Content ${path} -Tail ${lines}"`
-          : filter
-            ? `tail -n ${lines} ${path} | grep -E "${filter}"`
-            : `tail -n ${lines} ${path}`;
+      if (!existsSync(path)) {
+        return { success: false, output: `Log file not found: ${path}` };
+      }
 
-      const { stdout } = await execAsync(command);
-      return { success: true, output: stdout };
+      // Reads the file directly rather than shelling out to
+      // tail/grep/powershell — removes the injection surface entirely
+      // (both `path` and `filter` used to be interpolated unescaped into
+      // a shell command), and works identically on every platform.
+      let allLines = readFileSync(path, "utf-8").split("\n");
+      // A trailing newline (the common case for a real log file) produces
+      // a trailing "" element from split("\n") — without dropping it,
+      // `lines: N` would return the last N-1 real lines plus a blank one,
+      // one short of what `tail -n N` actually returns.
+      if (allLines.length > 0 && allLines[allLines.length - 1] === "") {
+        allLines = allLines.slice(0, -1);
+      }
+      const tail = allLines.slice(-lines);
+
+      let filterRegex: RegExp | undefined;
+      if (filter) {
+        try {
+          filterRegex = new RegExp(filter);
+        } catch {
+          return {
+            success: false,
+            output: `Invalid filter pattern: ${filter}`,
+          };
+        }
+      }
+
+      const result = filterRegex
+        ? tail.filter((line) => filterRegex!.test(line))
+        : tail;
+
+      return { success: true, output: result.join("\n") };
     } catch (error) {
       return {
         success: false,
@@ -536,12 +583,10 @@ export const gitLog: ToolDefinition = {
       const limit = (params.limit as number) ?? 10;
       const file = params.file as string | undefined;
 
-      let command = `git log --oneline -n ${limit}`;
-      if (file) {
-        command += ` -- "${file}"`;
-      }
+      const args = ["log", "--oneline", "-n", String(limit)];
+      if (file) args.push("--", file);
 
-      const { stdout } = await execAsync(command, { cwd });
+      const { stdout } = await execFileAsync("git", args, { cwd });
       return { success: true, output: stdout || "No commits found" };
     } catch (error) {
       return {
@@ -564,8 +609,7 @@ export const gitAdd: ToolDefinition = {
       const cwd = (params.cwd as string) ?? process.cwd();
       const files = (params.files as string[]) ?? ["."];
 
-      const command = `git add ${files.map((f) => `"${f}"`).join(" ")}`;
-      await execAsync(command, { cwd });
+      await execFileAsync("git", ["add", ...files], { cwd });
 
       return { success: true, output: `Staged ${files.length} file(s)` };
     } catch (error) {
@@ -589,8 +633,7 @@ export const gitCommit: ToolDefinition = {
       const cwd = (params.cwd as string) ?? process.cwd();
       const message = params.message as string;
 
-      const command = `git commit -m "${message.replace(/"/g, '\\"')}"`;
-      const { stdout } = await execAsync(command, { cwd });
+      const { stdout } = await execFileAsync("git", ["commit", "-m", message], { cwd });
 
       return { success: true, output: stdout };
     } catch (error) {
@@ -625,11 +668,11 @@ export const gitDiff: ToolDefinition = {
       const staged = (params.staged as boolean) ?? false;
       const file = params.file as string | undefined;
 
-      let command = "git diff";
-      if (staged) command += " --staged";
-      if (file) command += ` -- "${file}"`;
+      const args = ["diff"];
+      if (staged) args.push("--staged");
+      if (file) args.push("--", file);
 
-      const { stdout } = await execAsync(command, { cwd });
+      const { stdout } = await execFileAsync("git", args, { cwd });
       return { success: true, output: stdout || "No changes" };
     } catch (error) {
       return {
@@ -748,24 +791,27 @@ export const testRun: ToolDefinition = {
       const coverage = (params.coverage as boolean) ?? false;
 
       // Detect test framework
-      let command = "npm test";
+      let bin = "npm";
+      let args = ["test"];
       if (
         existsSync(join(cwd, "vitest.config.ts")) ||
         existsSync(join(cwd, "vitest.config.js"))
       ) {
-        command = "npx vitest run";
-        if (coverage) command += " --coverage";
-        if (pattern) command += ` --grep "${pattern}"`;
+        bin = "npx";
+        args = ["vitest", "run"];
+        if (coverage) args.push("--coverage");
+        if (pattern) args.push("--grep", pattern);
       } else if (
         existsSync(join(cwd, "jest.config.ts")) ||
         existsSync(join(cwd, "jest.config.js"))
       ) {
-        command = "npx jest";
-        if (coverage) command += " --coverage";
-        if (pattern) command += ` --testNamePattern="${pattern}"`;
+        bin = "npx";
+        args = ["jest"];
+        if (coverage) args.push("--coverage");
+        if (pattern) args.push("--testNamePattern", pattern);
       }
 
-      const { stdout, stderr } = await execAsync(command, {
+      const { stdout, stderr } = await execFileAsync(bin, args, {
         cwd,
         timeout: 120000,
       });
@@ -961,6 +1007,14 @@ export function registerBuiltinTools(
   // file-system.ts's file header): this file's own fileWrite/fileDelete
   // above are the ones actually reachable through the tool registry.
   for (const tool of createFileSystemTools()) {
+    registry.register(tool);
+  }
+
+  // git_branch/git_checkout/git_reset/git_remote/git_push/git_pull —
+  // previously defined but never registered anywhere, so the agent had no
+  // way to create/switch branches, push, pull, or reset at all (only
+  // status/diff/log/add/commit, registered individually above).
+  for (const tool of createGitTools()) {
     registry.register(tool);
   }
 

@@ -5,12 +5,8 @@
 
 import type { ToolDefinition } from "./ToolRegistry.js";
 import type { ToolResult } from "../../utils/types.js";
-import { exec } from "child_process";
-import { promisify } from "util";
 import { readFileSync, existsSync, readdirSync, statSync } from "fs";
 import { join, extname, basename } from "path";
-
-const execAsync = promisify(exec);
 
 export function createCodeSearchTools(): ToolDefinition[] {
   return [
@@ -164,27 +160,29 @@ export function createCodeSearchTools(): ToolDefinition[] {
           const caseSensitive = (params.caseSensitive as boolean) ?? false;
           const context = params.context as number | undefined;
 
-          let command = "grep";
-          if (recursive) command += " -r";
-          if (!caseSensitive) command += " -i";
-          if (context) command += ` -C ${context}`;
-          command += ` -- "${pattern.replace(/"/g, '\\"')}" "${path}"`;
+          if (!existsSync(path)) {
+            return { success: true, output: "No matches found" };
+          }
 
-          const { stdout } = await execAsync(command);
+          // Pure-JS, no shell involved — grep used to shell out with
+          // `pattern`/`path` interpolated into a command string (only `"`
+          // in the pattern was escaped; backticks, `$(...)`, `;`, and `|`
+          // were not), which was a real, exploitable command-injection
+          // vector. This mirrors search_content's already-safe design.
+          const matches = grepSearch(pattern, path, {
+            recursive,
+            caseSensitive,
+            context,
+          });
 
           return {
             success: true,
-            output: stdout || "No matches found",
+            output: matches.length > 0 ? matches.join("\n") : "No matches found",
           };
         } catch (error) {
-          // Grep returns non-zero when no matches
-          const err = error as { stdout?: string };
-          if (err.stdout) {
-            return { success: true, output: err.stdout };
-          }
           return {
-            success: true,
-            output: "No matches found",
+            success: false,
+            output: `Error running grep: ${error instanceof Error ? error.message : "Unknown error"}`,
           };
         }
       },
@@ -484,6 +482,77 @@ function searchContent(
   }
 
   return results;
+}
+
+/**
+ * Grep-style search over a single file or a directory tree — the `grep`
+ * tool's implementation. Pure JS (no shelling out to a real `grep`
+ * binary), so a malicious pattern/path can never do anything beyond what
+ * a RegExp/file read can do. Returns pre-formatted "file:line: content"
+ * lines (with `-` separators for context lines), same shape grep itself
+ * produces with `-C`.
+ */
+function grepSearch(
+  pattern: string,
+  targetPath: string,
+  options: { recursive: boolean; caseSensitive: boolean; context?: number },
+): string[] {
+  const regex = new RegExp(pattern, options.caseSensitive ? "g" : "gi");
+  const contextSize = options.context ?? 0;
+  const output: string[] = [];
+
+  function searchFile(filePath: string) {
+    let content: string;
+    try {
+      content = readFileSync(filePath, "utf-8");
+    } catch {
+      return; // unreadable/binary file — skip, matching grep's behavior
+    }
+    const lines = content.split("\n");
+
+    for (let i = 0; i < lines.length; i++) {
+      regex.lastIndex = 0;
+      if (!regex.test(lines[i])) continue;
+
+      const start = Math.max(0, i - contextSize);
+      const end = Math.min(lines.length - 1, i + contextSize);
+      for (let j = start; j <= end; j++) {
+        const marker = j === i ? ":" : "-";
+        output.push(`${filePath}${marker}${j + 1}${marker} ${lines[j]}`);
+      }
+      if (contextSize > 0 && end < lines.length - 1) {
+        output.push("--");
+      }
+    }
+  }
+
+  function walk(dir: string) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (["node_modules", ".git", "dist", "build"].includes(entry)) continue;
+      const fullPath = join(dir, entry);
+      const stats = statSync(fullPath);
+      if (stats.isDirectory()) {
+        if (options.recursive) walk(fullPath);
+      } else {
+        searchFile(fullPath);
+      }
+    }
+  }
+
+  const stats = statSync(targetPath);
+  if (stats.isDirectory()) {
+    walk(targetPath);
+  } else {
+    searchFile(targetPath);
+  }
+
+  return output;
 }
 
 interface ImportInfo {

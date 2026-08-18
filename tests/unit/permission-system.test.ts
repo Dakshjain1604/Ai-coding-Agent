@@ -194,3 +194,108 @@ describe("Risk-aware permission prompt (C4)", () => {
     expect(printed).not.toContain("Why:");
   });
 });
+
+// Regression coverage for the git-tools-hardening phase: git_branch/
+// git_checkout/git_reset/git_remote/git_push/git_pull are newly wired up
+// tools, all gated by the generic /^git_/ "prompt" rule — but the
+// permission prompt's Action line used to fall back to a generic
+// "Tool: git_reset" for anything without an explicit buildDescription()
+// case, which gave a human reviewing the prompt no way to tell a routine
+// git_reset apart from a --hard reset about to discard their work.
+describe("New git tool permission descriptions (git_branch/checkout/reset/remote/push/pull)", () => {
+  const ps = new PermissionSystem(mkdtempSync(join(tmpdir(), "perm-test-")));
+
+  it("still requires a prompt for every new git tool (generic /^git_/ rule)", () => {
+    for (const tool of [
+      "git_branch",
+      "git_checkout",
+      "git_reset",
+      "git_remote",
+      "git_push",
+      "git_pull",
+    ]) {
+      const check = ps.checkPermission(tool, {});
+      expect(check.allowed).toBe(false);
+      expect(check.requiresPrompt).toBe(true);
+    }
+  });
+
+  it("describes a plain branch listing", () => {
+    const check = ps.checkPermission("git_branch", {});
+    expect(check.description).toContain("List branches");
+  });
+
+  it("describes creating a branch", () => {
+    const check = ps.checkPermission("git_branch", { create: "feature-x" });
+    expect(check.description).toContain("Create branch");
+    expect(check.description).toContain("feature-x");
+  });
+
+  it("describes deleting a branch", () => {
+    const check = ps.checkPermission("git_branch", { delete: "old-branch" });
+    expect(check.description).toContain("Delete branch");
+    expect(check.description).toContain("old-branch");
+  });
+
+  it("describes a checkout with the target ref", () => {
+    const check = ps.checkPermission("git_checkout", { ref: "main" });
+    expect(check.description).toContain("Checkout");
+    expect(check.description).toContain("main");
+  });
+
+  it("describes a routine (non-hard) reset without a destructive warning", () => {
+    const check = ps.checkPermission("git_reset", { mode: "mixed", ref: "HEAD" });
+    expect(check.description).not.toContain("DESTRUCTIVE");
+    expect(check.description).toContain("mixed");
+  });
+
+  it("flags a --hard reset as destructive, distinct from a routine reset", () => {
+    const check = ps.checkPermission("git_reset", { mode: "hard", ref: "HEAD~3" });
+    expect(check.description).toContain("DESTRUCTIVE");
+    expect(check.description).toContain("--hard");
+    expect(check.description).toContain("HEAD~3");
+  });
+
+  it("describes a routine push without a destructive warning", () => {
+    const check = ps.checkPermission("git_push", { remote: "origin", branch: "main" });
+    expect(check.description).not.toContain("DESTRUCTIVE");
+    expect(check.description).toContain("origin");
+  });
+
+  it("flags a force push as destructive, distinct from a routine push", () => {
+    const check = ps.checkPermission("git_push", {
+      remote: "origin",
+      branch: "main",
+      force: true,
+    });
+    expect(check.description).toContain("DESTRUCTIVE");
+    expect(check.description).toContain("force");
+    expect(check.description).toContain("main");
+  });
+
+  it("describes a git_remote action with the target name", () => {
+    const check = ps.checkPermission("git_remote", { action: "remove", name: "upstream" });
+    expect(check.description).toContain("remove");
+    expect(check.description).toContain("upstream");
+  });
+
+  it("describes a git_pull with remote and branch", () => {
+    const check = ps.checkPermission("git_pull", { remote: "origin", branch: "develop" });
+    expect(check.description).toContain("origin");
+    expect(check.description).toContain("develop");
+  });
+
+  it("never falls back to the generic 'Tool: <name>' description for any of the six", () => {
+    for (const tool of [
+      "git_branch",
+      "git_checkout",
+      "git_reset",
+      "git_remote",
+      "git_push",
+      "git_pull",
+    ]) {
+      const check = ps.checkPermission(tool, {});
+      expect(check.description).not.toBe(`Tool: ${tool}`);
+    }
+  });
+});

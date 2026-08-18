@@ -1,249 +1,32 @@
 /**
- * Git Operations Tools
- * Tools for git repository operations
+ * Git Operations Tools — branch/checkout/reset/remote/push/pull.
+ *
+ * This file used to ALSO define git_status/git_diff/git_log/git_add/
+ * git_commit — a second, never-registered implementation of tool names
+ * builtin.ts already defines and registers (see that file's file header
+ * for the file-mutation-tool version of this exact story). Removed to
+ * avoid recreating that duplication trap; only the six tools with no
+ * equivalent elsewhere remain here.
+ *
+ * Every handler uses execFile() with an argv array, never a shell string
+ * — see builtin.ts's execFileAsync comment for why: a command built via
+ * string interpolation (the ORIGINAL shape of every handler in this file,
+ * before this rewrite) is trivially exploitable by a message/ref/URL
+ * containing shell metacharacters, regardless of quoting.
  */
 
 import type { ToolDefinition } from "./ToolRegistry.js";
 import type { ToolResult } from "../../utils/types.js";
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
-import { existsSync } from "fs";
-import { join } from "path";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export function createGitTools(): ToolDefinition[] {
   return [
     {
-      name: "git_status",
-      description: "Get git repository status",
-      parameters: {
-        path: {
-          type: "string",
-          description: "Path to git repository",
-          required: false,
-          default: ".",
-        },
-        porcelain: {
-          type: "boolean",
-          description: "Use machine-readable format",
-          required: false,
-          default: true,
-        },
-      },
-      handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
-        try {
-          const path = (params.path as string) ?? ".";
-          const porcelain = (params.porcelain as boolean) ?? true;
-
-          const command = `git status${porcelain ? " --porcelain" : ""}`;
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout || "Working tree clean",
-            metadata: { porcelain },
-          };
-        } catch (error) {
-          return {
-            success: false,
-            output: `Error getting git status: ${error instanceof Error ? error.message : "Unknown error"}`,
-          };
-        }
-      },
-    },
-
-    {
-      name: "git_diff",
-      description: "Show git diff",
-      parameters: {
-        path: {
-          type: "string",
-          description: "Path to git repository",
-          required: false,
-          default: ".",
-        },
-        staged: {
-          type: "boolean",
-          description: "Show staged changes",
-          required: false,
-          default: false,
-        },
-        file: {
-          type: "string",
-          description: "Specific file to diff",
-          required: false,
-        },
-      },
-      handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
-        try {
-          const path = (params.path as string) ?? ".";
-          const staged = (params.staged as boolean) ?? false;
-          const file = params.file as string | undefined;
-
-          let command = "git diff";
-          if (staged) command += " --staged";
-          if (file) command += ` -- ${file}`;
-
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout || "No changes",
-          };
-        } catch (error) {
-          return {
-            success: false,
-            output: `Error getting git diff: ${error instanceof Error ? error.message : "Unknown error"}`,
-          };
-        }
-      },
-    },
-
-    {
-      name: "git_log",
-      description: "Show git log",
-      parameters: {
-        path: {
-          type: "string",
-          description: "Path to git repository",
-          required: false,
-          default: ".",
-        },
-        count: {
-          type: "number",
-          description: "Number of commits to show",
-          required: false,
-          default: 10,
-        },
-        format: {
-          type: "string",
-          description: "Log format (oneline, short, medium, full)",
-          required: false,
-          default: "medium",
-        },
-        author: {
-          type: "string",
-          description: "Filter by author",
-          required: false,
-        },
-      },
-      handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
-        try {
-          const path = (params.path as string) ?? ".";
-          const count = (params.count as number) ?? 10;
-          const format = (params.format as string) ?? "medium";
-          const author = params.author as string | undefined;
-
-          const formatFlags: Record<string, string> = {
-            oneline: "--oneline",
-            short: "--short",
-            medium: "",
-            full: "--format=fuller",
-          };
-
-          let command = `git log -n ${count} ${formatFlags[format] ?? ""}`;
-          if (author) command += ` --author="${author}"`;
-
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout,
-          };
-        } catch (error) {
-          return {
-            success: false,
-            output: `Error getting git log: ${error instanceof Error ? error.message : "Unknown error"}`,
-          };
-        }
-      },
-    },
-
-    {
-      name: "git_add",
-      description: "Stage files for commit",
-      parameters: {
-        path: {
-          type: "string",
-          description: "Path to git repository",
-          required: false,
-          default: ".",
-        },
-        files: {
-          type: "array",
-          description: 'Files to stage (use "." for all)',
-          required: true,
-        },
-      },
-      handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
-        try {
-          const path = (params.path as string) ?? ".";
-          const files = params.files as string[];
-
-          const command = `git add ${files.map((f) => `"${f}"`).join(" ")}`;
-          await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: `Staged ${files.length} file(s): ${files.join(", ")}`,
-          };
-        } catch (error) {
-          return {
-            success: false,
-            output: `Error staging files: ${error instanceof Error ? error.message : "Unknown error"}`,
-          };
-        }
-      },
-    },
-
-    {
-      name: "git_commit",
-      description: "Create a git commit",
-      parameters: {
-        path: {
-          type: "string",
-          description: "Path to git repository",
-          required: false,
-          default: ".",
-        },
-        message: {
-          type: "string",
-          description: "Commit message",
-          required: true,
-        },
-        amend: {
-          type: "boolean",
-          description: "Amend previous commit",
-          required: false,
-          default: false,
-        },
-      },
-      handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
-        try {
-          const path = (params.path as string) ?? ".";
-          const message = params.message as string;
-          const amend = (params.amend as boolean) ?? false;
-
-          const command = `git commit${amend ? " --amend" : ""} -m "${message.replace(/"/g, '\\"')}"`;
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout,
-          };
-        } catch (error) {
-          return {
-            success: false,
-            output: `Error creating commit: ${error instanceof Error ? error.message : "Unknown error"}`,
-          };
-        }
-      },
-    },
-
-    {
       name: "git_branch",
-      description: "List or create branches",
+      description: "List, create, or delete branches",
       parameters: {
         path: {
           type: "string",
@@ -264,7 +47,7 @@ export function createGitTools(): ToolDefinition[] {
         },
         delete: {
           type: "string",
-          description: "Delete branch with this name",
+          description: "Delete branch with this name (safe delete — refuses if unmerged)",
           required: false,
         },
       },
@@ -275,26 +58,21 @@ export function createGitTools(): ToolDefinition[] {
           const checkout = (params.checkout as boolean) ?? false;
           const deleteBranch = params.delete as string | undefined;
 
-          let command: string;
-
+          let args: string[];
           if (create) {
-            if (checkout) {
-              command = `git checkout -b "${create}"`;
-            } else {
-              command = `git branch "${create}"`;
-            }
+            args = checkout ? ["checkout", "-b", create] : ["branch", create];
           } else if (deleteBranch) {
-            command = `git branch -D "${deleteBranch}"`;
+            // -d (not -D): refuses to delete a branch with unmerged
+            // commits rather than silently discarding them. A caller
+            // wanting to force-delete an unmerged branch should use
+            // shell_exec explicitly — this tool defaults to the safe path.
+            args = ["branch", "-d", deleteBranch];
           } else {
-            command = "git branch -a";
+            args = ["branch", "-a"];
           }
 
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout,
-          };
+          const { stdout } = await execFileAsync("git", args, { cwd: path });
+          return { success: true, output: stdout || "Done" };
         } catch (error) {
           return {
             success: false,
@@ -325,13 +103,8 @@ export function createGitTools(): ToolDefinition[] {
           const path = (params.path as string) ?? ".";
           const ref = params.ref as string;
 
-          const command = `git checkout "${ref}"`;
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout,
-          };
+          const { stdout } = await execFileAsync("git", ["checkout", ref], { cwd: path });
+          return { success: true, output: stdout || `Checked out ${ref}` };
         } catch (error) {
           return {
             success: false,
@@ -343,7 +116,8 @@ export function createGitTools(): ToolDefinition[] {
 
     {
       name: "git_reset",
-      description: "Reset git state",
+      description:
+        "Reset git state. mode:'hard' DISCARDS uncommitted working-tree changes irreversibly — use 'mixed' (default) or 'soft' unless a hard reset is genuinely intended.",
       parameters: {
         path: {
           type: "string",
@@ -371,13 +145,12 @@ export function createGitTools(): ToolDefinition[] {
           const mode = (params.mode as string) ?? "mixed";
           const ref = (params.ref as string) ?? "HEAD";
 
-          const command = `git reset --${mode} "${ref}"`;
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout || "Reset successful",
-          };
+          const { stdout } = await execFileAsync(
+            "git",
+            ["reset", `--${mode}`, ref],
+            { cwd: path },
+          );
+          return { success: true, output: stdout || "Reset successful" };
         } catch (error) {
           return {
             success: false,
@@ -389,7 +162,7 @@ export function createGitTools(): ToolDefinition[] {
 
     {
       name: "git_remote",
-      description: "Manage git remotes",
+      description: "List, add, or remove git remotes",
       parameters: {
         path: {
           type: "string",
@@ -421,30 +194,35 @@ export function createGitTools(): ToolDefinition[] {
           const name = params.name as string | undefined;
           const url = params.url as string | undefined;
 
-          let command: string;
+          let args: string[];
           switch (action) {
             case "list":
-              command = "git remote -v";
+              args = ["remote", "-v"];
               break;
             case "add":
-              if (!name || !url)
-                throw new Error("name and url required for add");
-              command = `git remote add "${name}" "${url}"`;
+              if (!name || !url) {
+                return {
+                  success: false,
+                  output: "name and url are required for action 'add'",
+                };
+              }
+              args = ["remote", "add", name, url];
               break;
             case "remove":
-              if (!name) throw new Error("name required for remove");
-              command = `git remote remove "${name}"`;
+              if (!name) {
+                return {
+                  success: false,
+                  output: "name is required for action 'remove'",
+                };
+              }
+              args = ["remote", "remove", name];
               break;
             default:
-              throw new Error(`Unknown action: ${action}`);
+              return { success: false, output: `Unknown action: ${action}` };
           }
 
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout || "Remote operation successful",
-          };
+          const { stdout } = await execFileAsync("git", args, { cwd: path });
+          return { success: true, output: stdout || "Remote operation successful" };
         } catch (error) {
           return {
             success: false,
@@ -456,7 +234,8 @@ export function createGitTools(): ToolDefinition[] {
 
     {
       name: "git_push",
-      description: "Push to remote repository",
+      description:
+        "Push to remote repository. force:true OVERWRITES remote history — never use it against a shared/main branch without explicit confirmation.",
       parameters: {
         path: {
           type: "string",
@@ -489,16 +268,12 @@ export function createGitTools(): ToolDefinition[] {
           const branch = params.branch as string | undefined;
           const force = (params.force as boolean) ?? false;
 
-          let command = `git push ${remote}`;
-          if (branch) command += ` ${branch}`;
-          if (force) command += " --force";
+          const args = ["push", remote];
+          if (branch) args.push(branch);
+          if (force) args.push("--force");
 
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout || "Push successful",
-          };
+          const { stdout } = await execFileAsync("git", args, { cwd: path });
+          return { success: true, output: stdout || "Push successful" };
         } catch (error) {
           return {
             success: false,
@@ -536,15 +311,11 @@ export function createGitTools(): ToolDefinition[] {
           const remote = (params.remote as string) ?? "origin";
           const branch = params.branch as string | undefined;
 
-          let command = `git pull ${remote}`;
-          if (branch) command += ` ${branch}`;
+          const args = ["pull", remote];
+          if (branch) args.push(branch);
 
-          const { stdout } = await execAsync(command, { cwd: path });
-
-          return {
-            success: true,
-            output: stdout || "Pull successful",
-          };
+          const { stdout } = await execFileAsync("git", args, { cwd: path });
+          return { success: true, output: stdout || "Pull successful" };
         } catch (error) {
           return {
             success: false,

@@ -3,12 +3,12 @@
  * Automatically formats code files using Prettier/ESLint post-write.
  */
 
-import { exec } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import { existsSync } from "fs";
 import { extname } from "path";
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 export async function formatFile(filePath: string, cwd?: string): Promise<boolean> {
   const ext = extname(filePath);
@@ -21,8 +21,9 @@ export async function formatFile(filePath: string, cwd?: string): Promise<boolea
   const workDir = cwd ?? process.cwd();
 
   try {
-    // Try running prettier on the written file
-    await execAsync(`npx prettier --write "${filePath}"`, {
+    // execFile with an argv array — filePath (a real file's own path, but
+    // still worth not trusting) is never interpolated into a shell string.
+    await execFileAsync("npx", ["prettier", "--write", filePath], {
       cwd: workDir,
       timeout: 10000,
     });

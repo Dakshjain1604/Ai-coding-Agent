@@ -367,6 +367,28 @@ export class PermissionSystem {
         return `Git add: ${chalk.cyan(params.files || "all")}`;
       case "git_commit":
         return `Git commit: ${chalk.cyan(params.message || "no message")}`;
+      case "git_branch":
+        if (params.delete) return `Delete branch: ${chalk.cyan(params.delete)}`;
+        if (params.create) return `Create branch: ${chalk.cyan(params.create)}`;
+        return `List branches`;
+      case "git_checkout":
+        return `Checkout: ${chalk.cyan(params.ref || "unknown")}`;
+      case "git_reset":
+        return params.mode === "hard"
+          ? chalk.red(
+              `⚠ DESTRUCTIVE: git reset --hard ${String(params.ref ?? "HEAD")} — discards uncommitted working-tree changes irreversibly`,
+            )
+          : `Git reset --${params.mode ?? "mixed"} ${chalk.cyan(params.ref ?? "HEAD")}`;
+      case "git_remote":
+        return `Git remote ${params.action}: ${chalk.cyan(params.name || "")}`;
+      case "git_push":
+        return params.force
+          ? chalk.red(
+              `⚠ DESTRUCTIVE: force-push to ${String(params.remote ?? "origin")}${params.branch ? "/" + String(params.branch) : ""} — may overwrite remote history`,
+            )
+          : `Git push to ${chalk.cyan(params.remote ?? "origin")}${params.branch ? "/" + String(params.branch) : ""}`;
+      case "git_pull":
+        return `Git pull from ${chalk.cyan(params.remote ?? "origin")}${params.branch ? "/" + String(params.branch) : ""}`;
       case "npm_install":
         return `Install npm packages`;
       case "npm_run":

@@ -18,6 +18,12 @@ export const TOOL_SETS: Record<AgentMode, string[]> = {
     "git_status",
     "git_add",
     "git_commit",
+    "git_branch",
+    "git_checkout",
+    "git_reset",
+    "git_remote",
+    "git_push",
+    "git_pull",
     "workspace_verify",
     "spawn_subagent",
   ],
@@ -35,6 +41,11 @@ export const TOOL_SETS: Record<AgentMode, string[]> = {
     "logs_read",
     "git_status",
     "git_diff",
+    // Branch/checkout are non-destructive navigation, useful for e.g.
+    // "does this bug exist on main too" — git_reset/git_push/git_remote/
+    // git_pull stay code-mode-only (write/destructive, not this mode's job).
+    "git_branch",
+    "git_checkout",
     "workspace_verify",
   ],
   test: [

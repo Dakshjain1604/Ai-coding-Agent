@@ -27,7 +27,7 @@
  *      0 turns.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import inquirer from "inquirer";
@@ -498,5 +498,80 @@ describe("UniversalAgent.execute() — file_restore end-to-end (rollback safety 
     expect(env.provider.calls.length).toBe(2);
     const secondCallText = messagesText(env.provider.calls[1]);
     expect(secondCallText).not.toContain("```result");
+  });
+});
+
+// Real end-to-end coverage for the git command-injection fix: drives a
+// real git_commit tool call, parsed from actual LLM output through the
+// full agent loop (not a direct handler call), with a payload that would
+// have achieved real code execution under the old execAsync-based
+// implementation.
+describe("UniversalAgent.execute() — git tool command-injection fix, end-to-end", () => {
+  let env: FakeAgentEnv;
+  let repoDir: string;
+
+  afterEach(() => {
+    env?.cleanup();
+    vi.restoreAllMocks();
+    if (repoDir) rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  it("a real git_commit tool call with a malicious message never executes it, and commits the literal text", async () => {
+    vi.spyOn(inquirer, "prompt").mockResolvedValue({ permission: "yes" });
+    repoDir = mkdtempSync(join(tmpdir(), "agent-e2e-git-"));
+    const { execFileSync } = await import("child_process");
+    execFileSync("git", ["init", "-q", "-b", "main", repoDir]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "t@t.com"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", repoDir, "commit", "-q", "--allow-empty", "-m", "init"]);
+    writeFileSync(join(repoDir, "f.txt"), "content");
+    execFileSync("git", ["-C", repoDir, "add", "f.txt"]);
+
+    const canary = join(repoDir, "PWNED");
+    const message = `pwned\`touch ${canary}\``;
+
+    env = setupFakeAgentEnv([
+      scriptedResult(
+        JSON.stringify({ tool: "git_commit", params: { cwd: repoDir, message } }),
+      ),
+      scriptedResult("Committed."),
+    ]);
+
+    const agent = new UniversalAgent("code");
+    const result = await agent.execute(makeTask("commit the change"));
+
+    expect(result.success).toBe(true);
+    const { existsSync } = await import("fs");
+    expect(existsSync(canary)).toBe(false);
+
+    const log = execFileSync("git", ["-C", repoDir, "log", "-1", "--format=%s"]).toString();
+    expect(log.trim()).toBe(message);
+  });
+
+  it("a real git_branch tool call, parsed from LLM output, actually creates a branch", async () => {
+    vi.spyOn(inquirer, "prompt").mockResolvedValue({ permission: "yes" });
+    repoDir = mkdtempSync(join(tmpdir(), "agent-e2e-git-"));
+    const { execFileSync } = await import("child_process");
+    execFileSync("git", ["init", "-q", "-b", "main", repoDir]);
+    execFileSync("git", ["-C", repoDir, "config", "user.email", "t@t.com"]);
+    execFileSync("git", ["-C", repoDir, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", repoDir, "commit", "-q", "--allow-empty", "-m", "init"]);
+
+    env = setupFakeAgentEnv([
+      scriptedResult(
+        JSON.stringify({
+          tool: "git_branch",
+          params: { path: repoDir, create: "feature-real-e2e" },
+        }),
+      ),
+      scriptedResult("Branch created."),
+    ]);
+
+    const agent = new UniversalAgent("code");
+    const result = await agent.execute(makeTask("create a feature branch"));
+
+    expect(result.success).toBe(true);
+    const branches = execFileSync("git", ["-C", repoDir, "branch"]).toString();
+    expect(branches).toContain("feature-real-e2e");
   });
 });

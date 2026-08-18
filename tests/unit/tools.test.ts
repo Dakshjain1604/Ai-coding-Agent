@@ -10,6 +10,7 @@ import {
 import { UniversalAgent } from "../../src/core/agents/UniversalAgent.js";
 import { TOOL_SETS } from "../../src/core/agents/tool-sets.js";
 import { getPermissionSystem } from "../../src/utils/permission-system.js";
+import { createGitTools } from "../../src/core/tools/git-operations.js";
 
 describe("ToolRegistry & Built-in Tools", () => {
   it("should register built-in tools and retrieve agent tool definition", () => {
@@ -120,5 +121,87 @@ describe("workspace_verify risk-aware lint step (C5)", () => {
     })) as { success: boolean; metadata: { lint: string } };
 
     expect(result.metadata.lint).toBe("SKIPPED");
+  });
+});
+
+// Regression coverage for the git-tools-hardening phase: git_branch/
+// git_checkout/git_reset/git_remote/git_push/git_pull (git-operations.ts)
+// were fully implemented but createGitTools() had zero call sites
+// anywhere — the agent had no way to create/switch branches, push, pull,
+// or reset at all. Also verifies the file-write-tool dedup discipline
+// from the prior phase wasn't quietly reintroduced for git tools: exactly
+// one implementation per tool name should ever reach the registry.
+describe("Newly wired git tools (git_branch/checkout/reset/remote/push/pull)", () => {
+  it("registers all six in the real tool registry", () => {
+    ensureBuiltinToolsRegistered();
+    const registry = getToolRegistry();
+    for (const name of [
+      "git_branch",
+      "git_checkout",
+      "git_reset",
+      "git_remote",
+      "git_push",
+      "git_pull",
+    ]) {
+      expect(registry.has(name)).toBe(true);
+    }
+  });
+
+  it("grants all six to code mode's tool set", () => {
+    for (const name of [
+      "git_branch",
+      "git_checkout",
+      "git_reset",
+      "git_remote",
+      "git_push",
+      "git_pull",
+    ]) {
+      expect(TOOL_SETS.code).toContain(name);
+    }
+  });
+
+  it("grants only the non-destructive pair (git_branch/git_checkout) to debug mode", () => {
+    expect(TOOL_SETS.debug).toContain("git_branch");
+    expect(TOOL_SETS.debug).toContain("git_checkout");
+    for (const name of ["git_reset", "git_remote", "git_push", "git_pull"]) {
+      expect(TOOL_SETS.debug).not.toContain(name);
+    }
+  });
+
+  it("withholds all six from the read-only review and plan modes", () => {
+    for (const mode of ["review", "plan"] as const) {
+      for (const name of [
+        "git_branch",
+        "git_checkout",
+        "git_reset",
+        "git_remote",
+        "git_push",
+        "git_pull",
+      ]) {
+        expect(TOOL_SETS[mode]).not.toContain(name);
+      }
+    }
+  });
+
+  it("converts each to a valid AgentTool schema", () => {
+    const registry = getToolRegistry();
+    for (const name of ["git_branch", "git_checkout", "git_reset", "git_remote", "git_push", "git_pull"]) {
+      const agentTool = registry.toAgentTool(name);
+      expect(agentTool).toBeDefined();
+      expect(agentTool?.name).toBe(name);
+    }
+  });
+
+  it("registers exactly one implementation per overlapping git tool name (no reintroduced duplication)", () => {
+    // git_status/git_diff/git_log/git_add/git_commit exist in BOTH
+    // builtin.ts (individually registered) and used to also exist in
+    // git-operations.ts before that duplication was removed. Guard
+    // against it silently coming back: git-operations.ts's createGitTools()
+    // must not define any of the five overlapping names.
+    const overlapping = ["git_status", "git_diff", "git_log", "git_add", "git_commit"];
+    const gitOpsNames = createGitTools().map((t) => t.name);
+    for (const name of overlapping) {
+      expect(gitOpsNames).not.toContain(name);
+    }
   });
 });
