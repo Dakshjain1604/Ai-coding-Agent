@@ -21,6 +21,20 @@ describe("maskApiKey", () => {
   });
 });
 
+describe("getDefaultConfig — provider list completeness", () => {
+  it("includes a default entry for huggingface (previously missing entirely, despite being a first-class ProviderType with its own documented env var)", () => {
+    const manager = createConfigManager(process.cwd());
+    const config = manager.get();
+    expect(config.providers.some((p) => p.type === "huggingface")).toBe(true);
+  });
+
+  it("deliberately omits ollama-cloud (no sensible default baseUrl — it points at a user-provided endpoint)", () => {
+    const manager = createConfigManager(process.cwd());
+    const config = manager.get();
+    expect(config.providers.some((p) => p.type === "ollama-cloud")).toBe(false);
+  });
+});
+
 describe("Config get masks apiKey, storage stays real", () => {
   it("keeps the real apiKey in the internal config object used for provider routing", () => {
     const manager = createConfigManager(process.cwd());

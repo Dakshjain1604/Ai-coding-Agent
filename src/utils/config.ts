@@ -263,6 +263,23 @@ export class ConfigManager {
           models: {},
           enabled: true,
         },
+        // huggingface used to be missing from this list entirely, despite
+        // being a first-class ProviderType (same enum entry as the other
+        // API-key-only cloud providers above) and having its own
+        // documented env var (HF_TOKEN, per CLAUDE.md). ProviderFactory
+        // still falls back to a bare stub for a type with no config
+        // entry, so this omission didn't break HuggingFace outright, but
+        // it meant `config list`/`config set providers.N...` had no entry
+        // for it at all. ollama-cloud is deliberately still not included
+        // here — unlike the others, it has no sensible default baseUrl
+        // (it points at a user-provided endpoint), so a default entry
+        // would just be a guaranteed-broken line in every healthcheck
+        // for users who never intend to use it.
+        {
+          type: "huggingface",
+          models: {},
+          enabled: true,
+        },
       ],
       agents: {
         orchestrator: {
