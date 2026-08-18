@@ -45,7 +45,7 @@ const BARE_TOKEN_PATTERNS: RegExp[] = [
   // Common vendor bearer-token prefixes (OpenAI/Anthropic/Groq/GitHub/Stripe-style)
   /\b(?:sk-|gsk_|ghp_|pk_(?:live|test)_)[A-Za-z0-9_-]{20,}\b/g,
   // Authorization headers
-  /\bBearer\s+[\w.\-]{20,}\b/gi,
+  /\bBearer\s+[\w.-]{20,}\b/gi,
 ];
 
 export function scrubSecrets(text: string): string {
