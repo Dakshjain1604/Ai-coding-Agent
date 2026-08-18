@@ -6,7 +6,7 @@
 import type { ToolDefinition } from "./ToolRegistry.js";
 import type { ToolResult } from "../../utils/types.js";
 import { readFileSync, existsSync, readdirSync, statSync } from "fs";
-import { join, extname, basename } from "path";
+import { join, extname } from "path";
 
 export function createCodeSearchTools(): ToolDefinition[] {
   return [
@@ -218,11 +218,21 @@ export function createCodeSearchTools(): ToolDefinition[] {
           const type = (params.type as string) ?? "all";
 
           // Simple implementation: search for the symbol
+          //
+          // "reference" used to be `${symbol}(?![^\\w])` — a negative
+          // lookahead for a NON-word character, i.e. it required a word
+          // character (or nothing at end-of-string) to follow. That's
+          // backwards: it excluded genuine call sites like "myFunc()" or
+          // "myFunc;" (immediately followed by punctuation, a non-word
+          // char) while matching "myFunc" as a false-positive substring
+          // inside a longer identifier like "myFuncName" (followed by a
+          // word char). Confirmed live before fixing. Now anchored on
+          // both sides so it matches the whole symbol as its own token.
           const pattern =
             type === "definition"
               ? `(class|interface|function|const|let|var)\\s+${symbol}`
               : type === "reference"
-                ? `${symbol}(?![^\\w])`
+                ? `(?<!\\w)${symbol}(?!\\w)`
                 : symbol;
 
           const results = searchContent(directory, pattern, "*", false, 50);
@@ -399,7 +409,16 @@ function searchFiles(
         continue;
       }
 
-      const stats = statSync(fullPath);
+      // A broken symlink (or a permission-denied entry) makes statSync
+      // throw ENOENT/EACCES — without this guard that aborted the ENTIRE
+      // search with success:false, discarding every real match already
+      // found elsewhere in the tree, over one unrelated dangling symlink.
+      let stats;
+      try {
+        stats = statSync(fullPath);
+      } catch {
+        continue;
+      }
 
       if (stats.isDirectory()) {
         walk(fullPath);
@@ -448,7 +467,14 @@ function searchContent(
         continue;
       }
 
-      const stats = statSync(fullPath);
+      // See searchFiles' walk() — a broken symlink/permission-denied entry
+      // must not abort the whole search.
+      let stats;
+      try {
+        stats = statSync(fullPath);
+      } catch {
+        continue;
+      }
 
       if (stats.isDirectory()) {
         walk(fullPath);
@@ -462,6 +488,13 @@ function searchContent(
             i < lines.length && results.length < maxResults;
             i++
           ) {
+            // The global flag makes .test() stateful across calls: without
+            // resetting lastIndex here, a match on an earlier line leaves
+            // lastIndex pointing past the start of a later (often shorter)
+            // line, silently causing a false-negative "no match" on that
+            // line even though the pattern is genuinely present. grepSearch()
+            // below already resets this correctly; searchContent() didn't.
+            regex.lastIndex = 0;
             if (regex.test(lines[i])) {
               results.push({
                 file: fullPath,
@@ -536,7 +569,15 @@ function grepSearch(
     for (const entry of entries) {
       if (["node_modules", ".git", "dist", "build"].includes(entry)) continue;
       const fullPath = join(dir, entry);
-      const stats = statSync(fullPath);
+      // See code-search.ts's searchFiles()/searchContent() walk()s — a
+      // broken symlink/permission-denied entry must not abort the whole
+      // grep, discarding every real match already found elsewhere.
+      let stats;
+      try {
+        stats = statSync(fullPath);
+      } catch {
+        continue;
+      }
       if (stats.isDirectory()) {
         if (options.recursive) walk(fullPath);
       } else {
@@ -639,7 +680,15 @@ function countLines(
         continue;
       }
 
-      const stats_entry = statSync(fullPath);
+      // See searchFiles()/searchContent()/grepSearch()'s walk()s — a
+      // broken symlink/permission-denied entry must not abort the whole
+      // line count.
+      let stats_entry;
+      try {
+        stats_entry = statSync(fullPath);
+      } catch {
+        continue;
+      }
 
       if (stats_entry.isDirectory()) {
         walk(fullPath);
