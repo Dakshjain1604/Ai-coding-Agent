@@ -27,8 +27,8 @@
  *      0 turns.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
+import { tmpdir, homedir } from "os";
 import { join } from "path";
 import inquirer from "inquirer";
 import { UniversalAgent } from "../../src/core/agents/UniversalAgent.js";
@@ -38,6 +38,8 @@ import {
   getRollbackManager,
   resetRollbackManager,
 } from "../../src/utils/git-rollback.js";
+import { resetTaskManager } from "../../src/utils/task-manager.js";
+import { createConfigManager } from "../../src/utils/config.js";
 import type { Task } from "../../src/utils/types.js";
 import {
   setupFakeAgentEnv,
@@ -573,5 +575,54 @@ describe("UniversalAgent.execute() — git tool command-injection fix, end-to-en
     expect(result.success).toBe(true);
     const branches = execFileSync("git", ["-C", repoDir, "branch"]).toString();
     expect(branches).toContain("feature-real-e2e");
+  });
+});
+
+// Real end-to-end coverage for the path-traversal fix: drives a real
+// directory_create tool call, parsed from actual LLM output, with a
+// relative path crafted to escape the sandboxed output directory — the
+// exact shape of the live PoC that created a real directory in the
+// user's home folder pre-fix.
+describe("UniversalAgent.execute() — path-traversal fix, end-to-end", () => {
+  let env: FakeAgentEnv;
+  let sandboxRoot: string;
+  let originalCwd: string;
+
+  afterEach(() => {
+    env?.cleanup();
+    vi.restoreAllMocks();
+    process.chdir(originalCwd);
+    resetTaskManager();
+    if (sandboxRoot) rmSync(sandboxRoot, { recursive: true, force: true });
+  });
+
+  it("a real directory_create tool call with a traversal payload never escapes the sandbox", async () => {
+    vi.spyOn(inquirer, "prompt").mockResolvedValue({ permission: "yes" });
+
+    originalCwd = process.cwd();
+    sandboxRoot = mkdtempSync(join(tmpdir(), "agent-e2e-traversal-"));
+    process.chdir(sandboxRoot);
+    createConfigManager(sandboxRoot);
+    resetTaskManager();
+
+    env = setupFakeAgentEnv([
+      scriptedResult(
+        JSON.stringify({
+          tool: "directory_create",
+          params: { path: "../../../../../../../ESCAPED_E2E" },
+        }),
+      ),
+      scriptedResult("Directory created."),
+    ]);
+
+    const agent = new UniversalAgent("code");
+    const result = await agent.execute(makeTask("create an output directory"));
+
+    expect(result.success).toBe(true);
+    expect(existsSync(join(sandboxRoot, "..", "ESCAPED_E2E"))).toBe(false);
+    expect(existsSync(join(homedir(), "ESCAPED_E2E"))).toBe(false);
+
+    const secondCallText = messagesText(env.provider.calls[1]);
+    expect(secondCallText).toContain("traversal");
   });
 });

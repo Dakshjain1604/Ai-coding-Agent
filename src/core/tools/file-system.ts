@@ -25,7 +25,7 @@ import {
   mkdirSync,
   statSync,
 } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, relative, isAbsolute, sep } from "path";
 import { getTaskManager } from "../../utils/task-manager.js";
 import { getRollbackManager } from "../../utils/git-rollback.js";
 
@@ -33,15 +33,38 @@ function getOutputDir(): string {
   return getTaskManager().getTaskOutputDir();
 }
 
+/**
+ * Resolves a relative path against the sandbox output directory, or
+ * passes an already-absolute path through unchanged. The relative-path
+ * branch is supposed to guarantee the result stays inside outputDir —
+ * confirmed live that it didn't: `join(outputDir, "../../../../tmp/x")`
+ * resolves OUTSIDE outputDir entirely (path.join doesn't clamp `..`
+ * segments to a base directory), so directory_create({path: "../../../
+ * ../tmp/ESCAPED"}) wrote a real directory straight into the user's home
+ * folder in one live reproduction. Now rejects any relative path whose
+ * resolved form escapes outputDir, instead of silently honoring it.
+ */
 function resolveOutputPath(relativePath: string): string {
   const outputDir = getOutputDir();
-  if (relativePath.startsWith(outputDir)) {
+  // Path-boundary-aware, not a raw string prefix check — the old
+  // `relativePath.startsWith(outputDir)` also treated a sibling directory
+  // that merely shares outputDir as a string prefix (e.g. "output-old"
+  // when outputDir is "output") as if it were already inside the sandbox.
+  if (relativePath === outputDir || relativePath.startsWith(outputDir + sep)) {
     return relativePath;
   }
   if (relativePath.startsWith("/") || relativePath.includes(":")) {
     return relativePath;
   }
-  return join(outputDir, relativePath);
+
+  const resolved = join(outputDir, relativePath);
+  const rel = relative(outputDir, resolved);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(
+      `Path traversal blocked: "${relativePath}" resolves outside the sandboxed output directory (${outputDir})`,
+    );
+  }
+  return resolved;
 }
 
 export function createFileSystemTools(): ToolDefinition[] {

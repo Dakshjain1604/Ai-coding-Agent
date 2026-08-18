@@ -191,3 +191,10 @@ export function getTaskManager(): TaskManager {
   }
   return taskManagerInstance;
 }
+
+/** Test-only: force a fresh singleton (e.g. after chdir'ing into a temp
+ * sandbox dir with its own config, so the next getTaskManager() call
+ * re-derives outputBaseDir from that dir instead of a stale cached value). */
+export function resetTaskManager(): void {
+  taskManagerInstance = null;
+}

@@ -6,6 +6,7 @@ import { diffLines, createTwoFilesPatch } from "diff";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { glob } from "glob";
 import { join, dirname } from "path";
+import { getRollbackManager } from "./git-rollback.js";
 
 export interface FileDiff {
   path: string;
@@ -70,6 +71,12 @@ export async function applyDiff(
 ): Promise<void> {
   mkdirSync(dirname(diff.sourcePath), { recursive: true });
   const outputContent = readFileSync(diff.outputPath, "utf-8");
+  // `apply` overwrites the real source tree in bulk, across every changed
+  // file in one shot — exactly the kind of high-blast-radius write the
+  // rollback safety net exists for, but this path never went through it.
+  // No-ops for a brand-new file (diff.isNew), same as file_write's own
+  // snapshot() call — nothing to lose by creating a file that didn't exist.
+  getRollbackManager().snapshot(diff.sourcePath);
   writeFileSync(diff.sourcePath, outputContent);
 }
 

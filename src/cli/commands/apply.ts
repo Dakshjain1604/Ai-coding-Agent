@@ -102,5 +102,10 @@ export default class ApplyCommand extends Command {
     this.log(
       chalk.green.bold(`\n✓ Applied ${diffs.length} change(s) successfully.`),
     );
+    this.log(
+      chalk.gray(
+        "  Each overwritten file was backed up first — run `coding-agent rollback <path>` to undo any one of them.",
+      ),
+    );
   }
 }
