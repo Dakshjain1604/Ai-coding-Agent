@@ -42,10 +42,7 @@ export class SkillRegistry {
       return;
     }
 
-    const skills = this.loader.loadFromDirectory(
-      this.builtinSkillsDir,
-      "markdown",
-    );
+    const skills = this.loader.loadFromDirectory(this.builtinSkillsDir);
 
     for (const skill of skills) {
       this.skills.set(skill.name, skill);
@@ -68,10 +65,7 @@ export class SkillRegistry {
       }
     }
 
-    const skills = this.loader.loadFromDirectory(
-      this.projectSkillsDir,
-      "markdown",
-    );
+    const skills = this.loader.loadFromDirectory(this.projectSkillsDir);
 
     for (const skill of skills) {
       this.skills.set(skill.name, skill);

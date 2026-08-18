@@ -5,6 +5,7 @@
 
 import type { ProviderType, ProviderConfig } from "../utils/types.js";
 import { getLogger } from "../utils/logger.js";
+import { getConfigManager } from "../utils/config.js";
 import { BaseProvider } from "./ProviderInterface.js";
 import { ClaudeProvider, type ClaudeConfig } from "./ClaudeProvider.js";
 import { OpenAIProvider, type OpenAIConfig } from "./OpenAIProvider.js";
@@ -102,8 +103,20 @@ export class ProviderFactory {
       return this.providers.get(type)!;
     }
 
-    // Create with default config
-    return this.create({ type, enabled: true, models: {} });
+    // Used to always pass a bare {type, enabled:true, models:{}} stub
+    // here — apiKey/baseUrl/models from the user's real, configured
+    // provider entry (coding-agent.json / `config set`) were never
+    // looked up at all, for ANY provider, on this path. Masked by each
+    // provider's own process.env fallback for apiKey in the common case
+    // (env vars are CLAUDE.md's documented primary configuration
+    // method), but ollama-cloud's baseUrl has no such fallback — it was
+    // completely unusable through this factory regardless of how a user
+    // configured it, since its required baseUrl could never reach the
+    // constructor. Now looks up the real entry from AppConfig.providers
+    // by type, falling back to the old stub only when no entry exists
+    // for that provider type at all.
+    const configured = getConfigManager().get().providers.find((p) => p.type === type);
+    return this.create(configured ?? { type, enabled: true, models: {} });
   }
 
   /**
@@ -193,7 +206,15 @@ export class ProviderFactory {
   private getConfigForProvider(
     type: ProviderType,
     config: Record<string, unknown>,
-  ): ClaudeConfig | OpenAIConfig | GeminiConfig | LocalConfig {
+  ):
+    | ClaudeConfig
+    | OpenAIConfig
+    | GeminiConfig
+    | LocalConfig
+    | GroqConfig
+    | OpenRouterConfig
+    | HuggingFaceConfig
+    | OllamaCloudConfig {
     const models = config.models as Record<string, string> | undefined;
     switch (type) {
       case "claude":
@@ -219,6 +240,37 @@ export class ProviderFactory {
           baseUrl: config.baseUrl as string | undefined,
           defaultModel: models?.code,
           provider: "ollama",
+        };
+      // These four used to fall through to the `default: return {}` branch
+      // below — apiKey/baseUrl/defaultModel from the user's real config
+      // were silently discarded for every one of them. Masked in practice
+      // by each provider's own process.env fallback (confirmed live: real
+      // Groq calls succeeded via GROQ_API_KEY during this session's
+      // testing) — but a user configuring apiKey via coding-agent.json/
+      // `config set` instead of an env var would have it silently
+      // ignored. ollama-cloud was the worst case: its baseUrl has NO env
+      // var fallback at all, so it was completely unusable through this
+      // factory regardless of how a user configured it.
+      case "groq":
+        return {
+          apiKey: config.apiKey as string | undefined,
+          defaultModel: models?.code,
+        };
+      case "openrouter":
+        return {
+          apiKey: config.apiKey as string | undefined,
+          defaultModel: models?.code,
+        };
+      case "huggingface":
+        return {
+          apiKey: config.apiKey as string | undefined,
+          defaultModel: models?.code,
+        };
+      case "ollama-cloud":
+        return {
+          baseUrl: config.baseUrl as string | undefined,
+          apiKey: config.apiKey as string | undefined,
+          defaultModel: models?.code,
         };
       default:
         return {};

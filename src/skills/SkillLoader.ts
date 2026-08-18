@@ -42,10 +42,15 @@ export class SkillLoader {
     }
   }
 
-  loadFromDirectory(
-    dirPath: string,
-    mode: SkillLoaderMode = "markdown",
-  ): Skill[] {
+  /**
+   * Loads every .md/.yaml/.yml file in dirPath, auto-detecting each
+   * file's format from its own extension — there used to be a `mode`
+   * parameter here too, but it was never actually read; every caller
+   * always passed "markdown" and the function ignored it regardless,
+   * always auto-detecting per file. Removed as dead, misleading API
+   * surface rather than kept unused.
+   */
+  loadFromDirectory(dirPath: string): Skill[] {
     const skills: Skill[] = [];
 
     if (!existsSync(dirPath)) {

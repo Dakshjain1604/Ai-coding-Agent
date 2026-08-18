@@ -3,7 +3,7 @@
  */
 
 import { mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync } from "fs";
-import { join, dirname } from "path";
+import { join } from "path";
 import { v4 as uuid } from "uuid";
 import {
   getSystemCapabilities,

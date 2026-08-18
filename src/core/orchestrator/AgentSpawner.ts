@@ -96,7 +96,12 @@ export class AgentSpawner {
     task: Task,
     config?: Partial<AgentConfig>,
   ): Promise<SpawnedAgent> {
-    const taskManager = getTaskManager();
+    // Ensures the TaskManager singleton (and its output/.tasks
+    // directories) is initialized even when a caller reaches spawn()
+    // without ever going through a path that calls createTask() first
+    // (e.g. AgentSpawner used directly, bypassing interactive.ts). Not
+    // assigned to a variable — nothing here needs the returned instance.
+    getTaskManager();
     const systemCaps = getSystemAnalyzer().analyze();
 
     const currentAgents = this.getAllSpawned().filter(
