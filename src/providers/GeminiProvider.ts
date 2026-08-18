@@ -7,8 +7,9 @@ import {
   GenerativeModel,
   Content,
   Part,
+  type FunctionDeclarationSchema,
 } from "@google/generative-ai";
-import type { CompletionOptions, StreamChunk } from "../utils/types.js";
+import type { CompletionOptions, StreamChunk, ToolCall } from "../utils/types.js";
 import {
   BaseProvider,
   type ChatMessage,
@@ -86,6 +87,19 @@ export class GeminiProvider extends BaseProvider {
     this.logger.providerCall("gemini", model);
 
     try {
+      // Gemini supports native function calling (a `tools:
+      // [{functionDeclarations}]` request field and a `response.
+      // functionCalls()` helper on the response) — this used to never
+      // forward `tools` or read functionCalls() at all, despite
+      // getCapabilities() already (incorrectly) claiming
+      // functionCalling: true. Same fix already applied to LocalProvider/
+      // GroqProvider/OpenRouterProvider this phase.
+      const geminiTools = options?.tools?.map((t) => ({
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters as unknown as FunctionDeclarationSchema,
+      }));
+
       const genModel = this.genAI.getGenerativeModel({
         model,
         generationConfig: {
@@ -94,6 +108,10 @@ export class GeminiProvider extends BaseProvider {
           topP: options?.topP,
           stopSequences: options?.stopSequences,
         },
+        tools:
+          geminiTools && geminiTools.length > 0
+            ? [{ functionDeclarations: geminiTools }]
+            : undefined,
       });
 
       const { contents, systemInstruction } = this.convertMessages(messages);
@@ -106,6 +124,15 @@ export class GeminiProvider extends BaseProvider {
       const response = result.response;
       const text = response.text();
 
+      const functionCalls = response.functionCalls();
+      const toolCalls: ToolCall[] | undefined =
+        functionCalls && functionCalls.length > 0
+          ? functionCalls.map((fc) => ({
+              name: fc.name,
+              params: fc.args as Record<string, unknown>,
+            }))
+          : undefined;
+
       return {
         content: text,
         usage: {
@@ -114,9 +141,10 @@ export class GeminiProvider extends BaseProvider {
           totalTokens: response.usageMetadata?.totalTokenCount ?? 0,
         },
         model,
-        finishReason: this.mapFinishReason(
-          response.candidates?.[0]?.finishReason,
-        ),
+        finishReason: toolCalls
+          ? "tool_calls"
+          : this.mapFinishReason(response.candidates?.[0]?.finishReason),
+        toolCalls,
       };
     } catch (error) {
       throw new ProviderError(

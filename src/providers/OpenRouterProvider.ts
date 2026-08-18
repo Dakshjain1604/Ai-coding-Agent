@@ -83,15 +83,45 @@ export class OpenRouterProvider extends BaseProvider {
     const model = options?.model ?? this.defaultModel;
 
     try {
+      // OpenRouter's API is OpenAI-compatible and most of its models
+      // support native tool calling (this client IS the OpenAI SDK) —
+      // this used to never forward `tools` or parse `tool_calls` back at
+      // all, despite getCapabilities() already (incorrectly) claiming
+      // functionCalling: true. OpenRouter is one of ModelRouter's two
+      // primary free-tier fallback providers, so this silently forced
+      // every OpenRouter-routed task onto the strictly more fragile
+      // text-based ```tool block parser instead of the reliable native
+      // mechanism Claude/OpenAI already get to use.
+      const openRouterTools = options?.tools?.map((t) => ({
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      }));
+
       const response = await this.client.chat.completions.create({
         model,
         messages: this.convertMessages(messages),
         temperature: options?.temperature,
         max_tokens: options?.maxTokens ?? 4096,
         stream: false,
+        tools: openRouterTools && openRouterTools.length > 0 ? openRouterTools : undefined,
       });
 
       const choice = response.choices[0];
+
+      const toolCalls = choice.message.tool_calls?.map((tc) => {
+        let params: Record<string, unknown> = {};
+        try {
+          params = JSON.parse(tc.function.arguments);
+        } catch {
+          params = {};
+        }
+        return { id: tc.id, name: tc.function.name, params };
+      });
+
       return {
         content: choice.message.content ?? "",
         usage: {
@@ -100,7 +130,8 @@ export class OpenRouterProvider extends BaseProvider {
           totalTokens: response.usage?.total_tokens ?? 0,
         },
         model: response.model,
-        finishReason: choice.finish_reason as "stop" | "length",
+        finishReason: this.mapFinishReason(choice.finish_reason),
+        toolCalls: toolCalls && toolCalls.length > 0 ? toolCalls : undefined,
       };
     } catch (error) {
       throw new ProviderError(
@@ -109,6 +140,15 @@ export class OpenRouterProvider extends BaseProvider {
         { model },
       );
     }
+  }
+
+  private mapFinishReason(
+    reason: string | null | undefined,
+  ): "stop" | "length" | "error" | "tool_calls" {
+    if (reason === "stop") return "stop";
+    if (reason === "length") return "length";
+    if (reason === "tool_calls") return "tool_calls";
+    return "error";
   }
 
   async *stream(
