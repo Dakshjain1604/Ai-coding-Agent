@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { getLogger } from "../../utils/logger.js";
 import { executeTask } from "../../core/orchestrator/AgentSpawner.js";
 import { validateProviders } from "../../utils/healthcheck.js";
+import { getPermissionSystem } from "../../utils/permission-system.js";
 import type { Task } from "../../utils/types.js";
 
 export default class ReviewCommand extends Command {
@@ -43,6 +44,10 @@ export default class ReviewCommand extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(ReviewCommand);
 
+    if (flags["no-confirm"]) {
+      getPermissionSystem().allowAll();
+    }
+
     // Validate providers are available
     await validateProviders();
 
@@ -72,7 +77,6 @@ export default class ReviewCommand extends Command {
         target: args.target,
         focus: flags.focus,
         format: flags.format,
-        noConfirm: flags["no-confirm"],
       },
     };
 

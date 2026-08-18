@@ -1,6 +1,7 @@
 /**
  * Memory Manager - Unified memory interface
- * Coordinates Project Memory, SQLite Store, and Context Window
+ * Coordinates SQLite storage (sole source of truth for MemoryEntry data)
+ * and the in-session write-buffer cache.
  */
 
 import { join } from "path";
@@ -8,6 +9,7 @@ import { getLogger } from "../utils/logger.js";
 import type {
   MemoryEntry,
   MemoryType,
+  MemoryScope,
   MemoryQuery,
   MemorySearchResult,
   MemoryManagerConfig,
@@ -17,20 +19,30 @@ import type {
   ExecutionRecord,
   PatternRecord,
 } from "./types.js";
-import { ProjectMemory, createProjectMemory } from "./ProjectMemory.js";
 import { SQLiteStore, createSQLiteStore } from "./SQLiteStore.js";
-import { ContextWindowManager, createContextWindow } from "./ContextWindow.js";
 import { SessionCache } from "./SessionCache.js";
 import { v4 as uuid } from "uuid";
+
+const INFERRED_MEMORY_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const INFERRED_DEFAULT_CONFIDENCE = 0.5;
+const EXPLICIT_CONFIDENCE = 1.0;
 
 /**
  * Memory Manager
  * Provides a unified interface for all memory operations
+ *
+ * Note: message/context truncation for LLM calls is owned solely by
+ * BaseAgent.truncateMessages() (the hot path that actually feeds the model).
+ * MemoryManager does not maintain a second, competing context-window budget.
+ *
+ * SQLite is the sole store for MemoryEntry data — a prior markdown
+ * dual-write (ProjectMemory) was retired because its regex-based
+ * markdown "database" silently dropped fields (expiresAt, most metadata)
+ * on every reload. `exportProjectKnowledge()` renders a read-only markdown
+ * view on demand instead of maintaining a parallel written store.
  */
 export class MemoryManager {
-  private projectMemory: ProjectMemory;
   private sqliteStore: SQLiteStore;
-  private contextWindow: ContextWindowManager;
   private sessionCache = new SessionCache();
   private sessionInitialized = false;
   private config: MemoryManagerConfig;
@@ -60,16 +72,16 @@ export class MemoryManager {
       enableEmbeddings: config?.enableEmbeddings ?? true,
     };
 
-    this.projectMemory = createProjectMemory(this.config.project);
     this.sqliteStore = createSQLiteStore(this.config.sqlite);
-    this.contextWindow = createContextWindow(this.config.contextWindow);
 
     this.logger.info("Memory Manager initialized");
   }
 
   async initSession(): Promise<void> {
     if (this.sessionInitialized) return;
-    const allEntries = await this.projectMemory.loadAll();
+    const allEntries = this.sqliteStore
+      .queryMemory({})
+      .map((result) => result.entry);
     this.sessionCache.loadAll(allEntries);
     this.sessionInitialized = true;
   }
@@ -77,13 +89,10 @@ export class MemoryManager {
   async flushSession(): Promise<void> {
     if (!this.sessionCache.isDirty()) return;
     const pending = this.sessionCache.getPendingWrites();
-    if (pending.length > 0) {
-      await this.projectMemory.batchWrite(pending);
-      for (const entry of pending) {
-        this.sqliteStore.storeMemory(entry);
-      }
-      this.sessionCache.clearPending();
+    for (const entry of pending) {
+      this.sqliteStore.storeMemory(entry);
     }
+    this.sessionCache.clearPending();
   }
 
   // ============================================================================
@@ -91,47 +100,61 @@ export class MemoryManager {
   // ============================================================================
 
   /**
-   * Store a memory entry
+   * Store a memory entry.
+   *
+   * `source` decides the confidence/expiry defaults, not a full
+   * trajectory-mining pipeline: "explicit" (an actual user statement, via
+   * remember()) gets full confidence and never expires; "inferred"
+   * (everything else — the default, so existing call sites keep their
+   * current behavior) gets a lower default confidence and a 30-day expiry
+   * so cleanup() actually has something to purge over time. Either default
+   * is skipped if the caller already set confidence/expiresAt explicitly.
    */
   async store(
     type: MemoryType,
     content: string,
     metadata?: Record<string, unknown>,
     priority?: "low" | "medium" | "high" | "critical",
+    options?: { scope?: MemoryScope; source?: "explicit" | "inferred" },
   ): Promise<MemoryEntry> {
+    const source = options?.source ?? "inferred";
+    const finalMetadata = { ...(metadata ?? {}) };
+
+    // expiresAt travels in via the metadata bag (no dedicated store() param
+    // needed) but belongs only on the entry's top-level field, not
+    // duplicated inside the stored metadata blob.
+    const explicitExpiresAt = finalMetadata.expiresAt as Date | undefined;
+    delete finalMetadata.expiresAt;
+
+    if (finalMetadata.confidence === undefined) {
+      finalMetadata.confidence =
+        source === "explicit" ? EXPLICIT_CONFIDENCE : INFERRED_DEFAULT_CONFIDENCE;
+    }
+
+    const now = new Date();
+    const expiresAt =
+      explicitExpiresAt ??
+      (source === "inferred"
+        ? new Date(now.getTime() + INFERRED_MEMORY_TTL_MS)
+        : undefined);
+
     const entry: MemoryEntry = {
       id: uuid(),
       type,
       content,
-      metadata: metadata ?? {},
+      metadata: finalMetadata,
+      scope: options?.scope ?? "project",
       priority: priority ?? "medium",
-      createdAt: new Date(),
-      updatedAt: new Date(),
+      createdAt: now,
+      updatedAt: now,
+      expiresAt,
       accessCount: 0,
     };
 
     if (this.sessionInitialized) {
       this.sessionCache.add(entry);
     } else {
-      await this.projectMemory.store({
-        type,
-        content,
-        metadata: metadata ?? {},
-        priority: priority ?? "medium",
-      });
-      this.sqliteStore.storeMemory({
-        ...entry,
-        embedding: metadata?.embedding as number[] | undefined,
-      });
-    }
-
-    const tokens = this.contextWindow.estimateTokens(content);
-    if (this.contextWindow.getRemainingCapacity() >= tokens) {
-      this.contextWindow.add(
-        entry,
-        tokens,
-        this.getPriorityValue(priority ?? "medium"),
-      );
+      this.sqliteStore.storeMemory(entry);
     }
 
     this.logger.memoryStore(entry.id);
@@ -139,30 +162,37 @@ export class MemoryManager {
   }
 
   /**
+   * Remember an explicit user-stated fact/preference — full confidence,
+   * no expiry, scoped to the user (not the project).
+   */
+  async remember(fact: string): Promise<MemoryEntry> {
+    return this.store("preference", fact, {}, "high", {
+      scope: "user",
+      source: "explicit",
+    });
+  }
+
+  /**
+   * Forget the closest-matching remembered fact.
+   */
+  async forget(fact: string): Promise<boolean> {
+    const results = await this.search(fact, 1);
+    if (!results.length) return false;
+    return this.delete(results[0].entry.id);
+  }
+
+  /**
    * Retrieve a memory entry by ID
    */
   async retrieve(id: string): Promise<MemoryEntry | null> {
-    // Try SQLite first (faster)
-    const entry = this.sqliteStore.getMemory(id);
-    if (entry) return entry;
-
-    // Fall back to project memory
-    return this.projectMemory.retrieve(id);
+    return this.sqliteStore.getMemory(id);
   }
 
   /**
    * Query memory entries
    */
   async query(query: MemoryQuery): Promise<MemorySearchResult[]> {
-    // Query SQLite for fast results
-    const results = this.sqliteStore.queryMemory(query);
-
-    // If not found in SQLite, fall back to project memory
-    if (results.length === 0) {
-      return this.projectMemory.query(query);
-    }
-
-    return results;
+    return this.sqliteStore.queryMemory(query);
   }
 
   /**
@@ -172,22 +202,15 @@ export class MemoryManager {
     id: string,
     updates: Partial<MemoryEntry>,
   ): Promise<MemoryEntry | null> {
-    // Update in SQLite
     this.sqliteStore.updateMemory(id, updates);
-
-    // Update in project memory
-    return this.projectMemory.update(id, updates);
+    return this.sqliteStore.getMemory(id);
   }
 
   /**
    * Delete a memory entry
    */
   async delete(id: string): Promise<boolean> {
-    // Delete from SQLite
-    this.sqliteStore.deleteMemory(id);
-
-    // Delete from project memory
-    return this.projectMemory.delete(id);
+    return this.sqliteStore.deleteMemory(id);
   }
 
   /**
@@ -220,6 +243,35 @@ export class MemoryManager {
     this.sqliteStore.storeEmbedding(id, embedding);
   }
 
+  /**
+   * Render all project-scoped memory as a human-readable markdown view —
+   * generated on demand from SQLite, never written to disk as a maintained
+   * file, so there's nothing for it to drift from. Backs the "show project
+   * knowledge" user-control command.
+   */
+  async exportProjectKnowledge(): Promise<string> {
+    const results = this.sqliteStore.queryMemory({ scope: "project" });
+    const byType = new Map<MemoryType, MemoryEntry[]>();
+    for (const { entry } of results) {
+      const group = byType.get(entry.type) ?? [];
+      group.push(entry);
+      byType.set(entry.type, group);
+    }
+
+    const sections: string[] = ["# Project Knowledge\n"];
+    for (const [type, entries] of byType) {
+      sections.push(`## ${type}\n`);
+      for (const entry of entries) {
+        const tags = entry.metadata.tags?.length
+          ? ` (tags: ${entry.metadata.tags.join(", ")})`
+          : "";
+        sections.push(`- ${entry.content}${tags}`);
+      }
+      sections.push("");
+    }
+    return sections.join("\n");
+  }
+
   // ============================================================================
   // Conversation Operations
   // ============================================================================
@@ -239,26 +291,24 @@ export class MemoryManager {
   }
 
   /**
-   * Add a turn to the current conversation
+   * Record a single turn in an already-started conversation — a thin
+   * wrapper over the already-implemented SQLiteStore.storeTurn(), which
+   * previously had no caller anywhere in the codebase (see
+   * BaseAgent.initializeContext()/addMessage() for the wiring).
    */
-  addConversationTurn(
+  recordTurn(
     conversationId: string,
-    role: "user" | "assistant" | "system",
+    role: ConversationTurn["role"],
     content: string,
     metadata?: Record<string, unknown>,
-  ): ConversationTurn {
-    const turn: ConversationTurn = {
+  ): void {
+    this.sqliteStore.storeTurn(conversationId, {
       id: uuid(),
       role,
       content,
       timestamp: new Date(),
       metadata,
-    };
-
-    // Store turn directly to database without reloading/reinserting full conversation
-    this.sqliteStore.storeTurn(conversationId, turn);
-
-    return turn;
+    });
   }
 
   /**
@@ -287,7 +337,12 @@ export class MemoryManager {
   // ============================================================================
 
   /**
-   * Log an execution
+   * Log an execution.
+   *
+   * Intentionally write-once-per-task, direct to SQLite — this does NOT go
+   * through the session batch (unlike `store()`'s MemoryEntry path, which
+   * loads once at session start and flushes once at session end). Execution
+   * records are one-per-task by construction, so there's nothing to batch.
    */
   logExecution(
     agentType: string,
@@ -356,58 +411,6 @@ export class MemoryManager {
   }
 
   // ============================================================================
-  // Context Window Operations
-  // ============================================================================
-
-  /**
-   * Add to context window
-   */
-  addToContext(entry: MemoryEntry, tokens?: number, priority?: number): void {
-    const estimatedTokens =
-      tokens ?? this.contextWindow.estimateTokens(entry.content);
-    this.contextWindow.add(entry, estimatedTokens, priority ?? 1);
-  }
-
-  /**
-   * Get context text
-   */
-  getContextText(): string {
-    return this.contextWindow.getContextText();
-  }
-
-  /**
-   * Get context size
-   */
-  getContextSize(): number {
-    return this.contextWindow.getSize();
-  }
-
-  /**
-   * Get remaining context capacity
-   */
-  getRemainingContextCapacity(): number {
-    return this.contextWindow.getRemainingCapacity();
-  }
-
-  /**
-   * Clear context window
-   */
-  clearContext(): void {
-    this.contextWindow.clear();
-  }
-
-  /**
-   * Compact context window
-   */
-  compactContext(): {
-    removedEntries: number;
-    retainedSize: number;
-    summary: string;
-  } {
-    return this.contextWindow.compact();
-  }
-
-  // ============================================================================
   // Statistics and Maintenance
   // ============================================================================
 
@@ -415,15 +418,27 @@ export class MemoryManager {
    * Get memory statistics
    */
   async getStats(): Promise<MemoryStats> {
-    const projectStats = await this.projectMemory.getStats();
     const sqliteStats = this.sqliteStore.getStats();
+    const detailed = this.sqliteStore.getStatsDetailed();
+
+    const byType: Record<MemoryType, number> = {
+      pattern: 0,
+      decision: 0,
+      preference: 0,
+      conversation: 0,
+      execution: 0,
+      plan: 0,
+    };
+    for (const [type, count] of Object.entries(detailed.byType)) {
+      if (type in byType) byType[type as MemoryType] = count;
+    }
 
     return {
-      totalEntries: projectStats.totalEntries,
+      totalEntries: sqliteStats.memoryEntries,
       totalSize: sqliteStats.memoryEntries,
-      byType: projectStats.byType,
-      oldestEntry: projectStats.oldestEntry,
-      newestEntry: projectStats.newestEntry,
+      byType,
+      oldestEntry: detailed.oldestEntry,
+      newestEntry: detailed.newestEntry,
       averageAccessCount: 0, // Would need to calculate
     };
   }
@@ -436,11 +451,10 @@ export class MemoryManager {
   }
 
   /**
-   * Clear all memory (with backup)
+   * Clear all memory entries.
    */
   async clear(): Promise<void> {
-    await this.projectMemory.clear();
-    this.clearContext();
+    this.sqliteStore.clearAllMemory();
     this.logger.info("All memory cleared");
   }
 
@@ -450,17 +464,6 @@ export class MemoryManager {
   close(): void {
     this.sqliteStore.close();
     this.logger.debug("Memory Manager closed");
-  }
-
-  // ============================================================================
-  // Private Methods
-  // ============================================================================
-
-  private getPriorityValue(
-    priority: "low" | "medium" | "high" | "critical",
-  ): number {
-    const values = { low: 1, medium: 2, high: 3, critical: 4 };
-    return values[priority] ?? 2;
   }
 }
 

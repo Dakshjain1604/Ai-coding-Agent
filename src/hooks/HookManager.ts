@@ -104,7 +104,7 @@ export class HookManager {
 
         if (result?.skip) {
           this.logger.debug(`Hook ${hook.name} requested skip`);
-          return { success: true, skip: true };
+          return { success: false, skip: true, error: result?.error };
         }
 
         if (result?.modifiedData) {

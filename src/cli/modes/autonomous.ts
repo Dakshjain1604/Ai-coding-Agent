@@ -8,6 +8,7 @@ import { getLogger } from "../../utils/logger.js";
 import { getAgentSpawner } from "../../core/orchestrator/AgentSpawner.js";
 import { getTaskAnalyzer } from "../../core/orchestrator/TaskAnalyzer.js";
 import { getHookManager } from "../../hooks/HookManager.js";
+import { registerBuiltinHooks } from "../../hooks/registerBuiltinHooks.js";
 import type {
   Task,
   TaskComplexity,
@@ -107,6 +108,7 @@ export class AutonomousMode {
   private async initializeSystems(): Promise<void> {
     const hookManager = getHookManager();
     hookManager.enable();
+    registerBuiltinHooks();
   }
 
   private async executeIteration(state: ExecutionState): Promise<TaskResult> {
@@ -118,18 +120,7 @@ export class AutonomousMode {
     }
 
     const spawned = await spawner.spawn(agentType, state.task);
-
-    if (spawned.result) {
-      return spawned.result;
-    }
-
-    return {
-      taskId: state.task.id,
-      success: false,
-      output: "No result from agent",
-      durationMs: 0,
-      agentType,
-    };
+    return spawner.execute(spawned.id);
   }
 
   private synthesizeResults(state: ExecutionState): TaskResult {

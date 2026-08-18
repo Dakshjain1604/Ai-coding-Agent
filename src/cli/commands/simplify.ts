@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { getLogger } from "../../utils/logger.js";
 import { executeTask } from "../../core/orchestrator/AgentSpawner.js";
 import { validateProviders } from "../../utils/healthcheck.js";
+import { getPermissionSystem } from "../../utils/permission-system.js";
 import type { Task } from "../../utils/types.js";
 
 export default class SimplifyCommand extends Command {
@@ -42,6 +43,10 @@ export default class SimplifyCommand extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(SimplifyCommand);
 
+    if (flags["no-confirm"]) {
+      getPermissionSystem().allowAll();
+    }
+
     // Validate providers are available
     await validateProviders();
 
@@ -74,7 +79,6 @@ export default class SimplifyCommand extends Command {
         target: args.target,
         dryRun: flags["dry-run"],
         checkOnly: flags["check-only"],
-        noConfirm: flags["no-confirm"],
       },
     };
 

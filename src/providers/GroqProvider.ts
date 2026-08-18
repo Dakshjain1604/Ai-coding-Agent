@@ -41,7 +41,7 @@ export class GroqProvider extends BaseProvider {
       baseURL: "https://api.groq.com/openai/v1",
     });
 
-    this.defaultModel = config?.defaultModel ?? "llama-3.3-70b-versatile";
+    this.defaultModel = config?.defaultModel ?? "openai/gpt-oss-20b";
   }
 
   async isAvailable(): Promise<boolean> {
@@ -61,13 +61,11 @@ export class GroqProvider extends BaseProvider {
       vision: false,
       maxContextLength: 128000,
       supportedModels: [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile",
-        "llama-3.1-8b-instant",
-        "llama3-70b-8192",
-        "llama3-8b-8192",
-        "mixtral-8x7b-32768",
-        "gemma2-9b-it",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.6-27b",
+        "groq/compound",
+        "groq/compound-mini",
       ],
     };
   }
@@ -158,10 +156,9 @@ export class GroqProvider extends BaseProvider {
     model: string,
   ): number {
     const rates: Record<string, { input: number; output: number }> = {
-      "llama-3.3-70b-versatile": { input: 0, output: 0 },
-      "llama-3.1-70b-versatile": { input: 0, output: 0 },
-      "llama-3.1-8b-instant": { input: 0, output: 0 },
-      "mixtral-8x7b-32768": { input: 0, output: 0 },
+      "openai/gpt-oss-120b": { input: 0, output: 0 },
+      "openai/gpt-oss-20b": { input: 0, output: 0 },
+      "qwen/qwen3.6-27b": { input: 0, output: 0 },
     };
     const rate = rates[model] ?? { input: 0, output: 0 };
     return (

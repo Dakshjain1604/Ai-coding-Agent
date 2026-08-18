@@ -13,6 +13,8 @@ export interface AnalysisResult {
   suggestedStrategy: SpawnStrategy;
   estimatedTokens: number;
   estimatedDuration: number;
+  risk: "low" | "medium" | "high";
+  riskFactors: AnalysisFactor[];
 }
 
 export interface AnalysisFactor {
@@ -44,6 +46,8 @@ export class TaskAnalyzer {
     const complexity = this.calculateComplexity(factors);
     const strategy = this.determineStrategy(complexity, task);
     const estimates = this.estimateResources(complexity, task);
+    const riskFactors = this.analyzeRiskFactors(task.description.toLowerCase());
+    const risk = this.calculateRisk(riskFactors);
 
     return {
       complexity,
@@ -52,6 +56,8 @@ export class TaskAnalyzer {
       suggestedStrategy: strategy,
       estimatedTokens: estimates.tokens,
       estimatedDuration: estimates.duration,
+      risk,
+      riskFactors,
     };
   }
 
@@ -143,6 +149,99 @@ export class TaskAnalyzer {
     }, 0);
 
     return Math.max(0.5, 1 - variance / factors.length);
+  }
+
+  /**
+   * Risk is scored independently from complexity/scope — they measure
+   * different things. "Rename a UI label across 20 files" scores high on
+   * complexity's scope/fileCount factors but is low-risk; "delete the
+   * users table in production" is a 4-word description that scores low on
+   * every complexity factor but is obviously high-risk. Reusing the
+   * complexity score for risk would silently misfire on exactly the cases
+   * that matter most.
+   */
+  private analyzeRiskFactors(description: string): AnalysisFactor[] {
+    const destructiveKeywords = [
+      "delete",
+      "drop",
+      "truncate",
+      "wipe",
+      "remove all",
+      "force push",
+      "rm -rf",
+      "reset --hard",
+    ];
+    const sensitiveKeywords = [
+      "credential",
+      "secret",
+      "token",
+      "password",
+      "auth",
+      "payment",
+      "permission",
+      "api key",
+    ];
+    const irreversibleKeywords = [
+      "production",
+      "prod",
+      "deploy",
+      "release",
+      "migrate",
+      "migration",
+      "schema change",
+    ];
+
+    const countHits = (keywords: string[]) =>
+      keywords.filter((k) => description.includes(k)).length;
+
+    const destructiveHits = countHits(destructiveKeywords);
+    const sensitiveHits = countHits(sensitiveKeywords);
+    const irreversibleHits = countHits(irreversibleKeywords);
+
+    return [
+      {
+        name: "destructiveOps",
+        value: Math.min(destructiveHits, 1),
+        weight: 0.45,
+        description:
+          destructiveHits > 0
+            ? "Contains destructive/irreversible operation keywords"
+            : "No destructive operation keywords found",
+      },
+      {
+        name: "sensitiveDomain",
+        value: Math.min(sensitiveHits, 1),
+        weight: 0.3,
+        description:
+          sensitiveHits > 0
+            ? "Touches credentials/secrets/auth/payment"
+            : "No sensitive-domain keywords found",
+      },
+      {
+        name: "irreversibility",
+        value: Math.min(irreversibleHits, 1),
+        weight: 0.25,
+        description:
+          irreversibleHits > 0
+            ? "Involves production/deployment/migration"
+            : "No production/deployment keywords found",
+      },
+    ];
+  }
+
+  private calculateRisk(
+    riskFactors: AnalysisFactor[],
+  ): "low" | "medium" | "high" {
+    const weightedSum = riskFactors.reduce(
+      (sum, f) => sum + f.value * f.weight,
+      0,
+    );
+    const totalWeight = riskFactors.reduce((sum, f) => sum + f.weight, 0);
+    const score = weightedSum / totalWeight;
+
+    if (score < 0.3) return "low";
+    if (score < 0.6) return "medium";
+    return "high";
   }
 
   /**
@@ -310,7 +409,14 @@ export class TaskAnalyzer {
     if (description.includes('line') || description.includes('fix typo') || description.includes('small')) {
       return { value: 0.1, description: 'Line-level scope' };
     }
-    return { value: 0.5, description: 'Moderate scope' };
+    // No scope signal found at all — bias toward "assume narrow" rather
+    // than "assume moderate". A 0.5 default here (combined with
+    // analyzeImplementation's old 0.5 default) was enough on its own to
+    // push any keyword-free task — e.g. "say hello" — into "medium"
+    // complexity, which then routed to a 2-agent pipeline instead of a
+    // single lightweight agent. Confirmed live: this is what a plain "say
+    // hello" task actually did before this fix.
+    return { value: 0.2, description: 'No scope signal found (assumed narrow)' };
   }
 
   private countDomains(description: string): number {
@@ -355,7 +461,10 @@ export class TaskAnalyzer {
       }
     }
 
-    return { value: 0.5, description: 'Standard implementation' };
+    // Same reasoning as analyzeScope's default: no complexity keyword
+    // found is evidence of nothing, not evidence of "standard/moderate"
+    // work — bias low so unrecognized phrasing doesn't get inflated.
+    return { value: 0.2, description: 'No complexity keyword found (assumed simple)' };
   }
 
   private analyzeTesting(description: string): { value: number; description: string } {

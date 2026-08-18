@@ -31,7 +31,11 @@ export class Logger {
   };
 
   constructor(config?: Partial<LoggerConfig>) {
-    this.level = config?.level ?? "info";
+    const envLevel = process.env.LOG_LEVEL as LogLevel | undefined;
+    const validLevels: LogLevel[] = ["debug", "info", "warn", "error", "silent"];
+    this.level =
+      config?.level ??
+      (envLevel && validLevels.includes(envLevel) ? envLevel : "info");
     this.prefix = config?.prefix ?? "";
     this.timestamp = config?.timestamp ?? false;
     this.colorize = config?.colorize ?? true;

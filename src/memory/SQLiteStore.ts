@@ -59,6 +59,7 @@ export class SQLiteStore {
         content TEXT NOT NULL,
         metadata TEXT,
         priority TEXT DEFAULT 'medium',
+        scope TEXT NOT NULL DEFAULT 'project',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         expires_at DATETIME,
@@ -127,8 +128,32 @@ export class SQLiteStore {
       CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type);
     `);
 
+    this.migrateSchema();
+
     this.initialized = true;
     this.logger.debug('SQLite store initialized');
+  }
+
+  /**
+   * `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already
+   * exists on disk — it will never add a column introduced after the
+   * table's first release. This runs additive, idempotent `ALTER TABLE`
+   * migrations for any such column, checked via `PRAGMA table_info` so it's
+   * safe to call on every startup. Add future column migrations here in
+   * the same shape.
+   */
+  private migrateSchema(): void {
+    const columns = this.db
+      .prepare(`PRAGMA table_info(memory_entries)`)
+      .all() as { name: string }[];
+
+    if (!columns.some((c) => c.name === 'scope')) {
+      // Rows written before scoping existed were, in fact, project-scoped —
+      // 'project' is the correct default, not just a safe placeholder.
+      this.db.exec(
+        `ALTER TABLE memory_entries ADD COLUMN scope TEXT NOT NULL DEFAULT 'project'`,
+      );
+    }
   }
 
   // ============================================================================
@@ -138,13 +163,17 @@ export class SQLiteStore {
   /**
    * Store a memory entry
    */
-  storeMemory(entry: Omit<MemoryEntry, 'id'>): MemoryEntry {
-    const id = uuid();
+  storeMemory(entry: (Omit<MemoryEntry, 'id'> & { id?: string })): MemoryEntry {
+    // Respect a caller-provided id (e.g. MemoryManager.store() already
+    // minted one to return to its own caller) — minting a fresh one here
+    // regardless would silently desync the returned entry's id from what's
+    // actually stored, making it unretrievable by that id.
+    const id = entry.id ?? uuid();
     const now = new Date();
 
     const stmt = this.db.prepare(`
-      INSERT INTO memory_entries (id, type, content, metadata, priority, created_at, updated_at, expires_at, access_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO memory_entries (id, type, content, metadata, priority, scope, created_at, updated_at, expires_at, access_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -153,6 +182,7 @@ export class SQLiteStore {
       entry.content,
       JSON.stringify(entry.metadata),
       entry.priority,
+      entry.scope ?? 'project',
       entry.createdAt?.toISOString() ?? now.toISOString(),
       entry.updatedAt?.toISOString() ?? now.toISOString(),
       entry.expiresAt?.toISOString() ?? null,
@@ -194,6 +224,11 @@ export class SQLiteStore {
     if (query.type) {
       conditions.push('type = ?');
       params.push(query.type);
+    }
+
+    if (query.scope) {
+      conditions.push('scope = ?');
+      params.push(query.scope);
     }
 
     if (query.startDate) {
@@ -555,12 +590,55 @@ export class SQLiteStore {
   }
 
   /**
+   * Per-type memory_entries breakdown + oldest/newest timestamps — backs
+   * MemoryManager.getStats() now that SQLite is the sole store for
+   * MemoryEntry data (see architecture-optimal.md Phase 2 item A1).
+   */
+  getStatsDetailed(): {
+    byType: Record<string, number>;
+    oldestEntry?: Date;
+    newestEntry?: Date;
+  } {
+    const rows = this.db
+      .prepare(`SELECT type, COUNT(*) as count FROM memory_entries GROUP BY type`)
+      .all() as { type: string; count: number }[];
+    const byType: Record<string, number> = {};
+    for (const row of rows) byType[row.type] = row.count;
+
+    const bounds = this.db
+      .prepare(
+        `SELECT MIN(created_at) as oldest, MAX(created_at) as newest FROM memory_entries`,
+      )
+      .get() as { oldest: string | null; newest: string | null };
+
+    return {
+      byType,
+      oldestEntry: bounds.oldest ? new Date(bounds.oldest) : undefined,
+      newestEntry: bounds.newest ? new Date(bounds.newest) : undefined,
+    };
+  }
+
+  /**
+   * Delete every memory_entries row (and any embeddings, now that SQLite is
+   * the sole store — see architecture-optimal.md Phase 2 item A1). Does not
+   * touch conversations/executions/patterns, which are separate histories.
+   */
+  clearAllMemory(): void {
+    this.db.exec('DELETE FROM embeddings; DELETE FROM memory_entries;');
+  }
+
+  /**
    * Clean up expired entries
    */
   cleanup(): number {
+    // expires_at is stored as a JS toISOString() string (T-separated, Z
+    // suffix); bare CURRENT_TIMESTAMP is SQLite's space-separated format —
+    // comparing them as raw TEXT is a lexicographic comparison of two
+    // different formats and silently never matches, regardless of actual
+    // chronology. datetime(...) normalizes both sides first.
     const result = this.db.prepare(`
       DELETE FROM memory_entries
-      WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP
+      WHERE expires_at IS NOT NULL AND datetime(expires_at) < datetime('now')
     `).run();
 
     return result.changes;
@@ -615,6 +693,7 @@ export class SQLiteStore {
       content: row.content,
       metadata: JSON.parse(row.metadata ?? '{}'),
       priority: row.priority as MemoryEntry['priority'],
+      scope: (row.scope as MemoryEntry['scope']) ?? 'project',
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at),
       expiresAt: row.expires_at ? new Date(row.expires_at) : undefined,

@@ -22,10 +22,15 @@ import type {
 import type { BaseProvider } from "../../providers/ProviderInterface.js";
 import { getProviderFactory } from "../../providers/ProviderFactory.js";
 import { getModelRouter } from "../../providers/ModelRouter.js";
+import { getConfigManager } from "../../utils/config.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
 import type { MemoryManager } from "../../memory/MemoryManager.js";
 import { parseToolCalls } from "./tool-parser.js";
 import { TelemetryCollector } from "../../telemetry/TelemetryCollector.js";
+import { compactMessages, renderSummaryMessage } from "./Compactor.js";
+import { getHookManager } from "../../hooks/HookManager.js";
+import { getPermissionSystem } from "../../utils/permission-system.js";
+import { scrubSecrets } from "../../utils/secret-scrubber.js";
 
 export interface AgentTool {
   name: string;
@@ -37,6 +42,7 @@ export interface AgentTool {
 export interface AgentContext {
   taskId: string;
   task: Task;
+  conversationId: string;
   messages: ChatMessage[];
   toolResults: Map<string, unknown>;
   memory: MemoryManager;
@@ -73,6 +79,10 @@ export abstract class BaseAgent {
   protected telemetrySessionId?: string;
   /** Current turn number for telemetry (set by UniversalAgent turn tracking) */
   protected telemetryTurnNumber?: number;
+  /** Current structured compaction summary, if any turns have been compacted yet (see Compactor.ts). */
+  private compactionSummary?: string;
+  /** How many entries of the append-only history array are already folded into compactionSummary — only messages after this index get sent for (re-)compaction. */
+  private compactedThroughIndex = 0;
 
   constructor(type: AgentType, config: Partial<AgentConfig>) {
     this.id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -88,7 +98,9 @@ export abstract class BaseAgent {
   public getToolSchemas(): ToolSchema[] {
     const schemas: ToolSchema[] = [];
     for (const tool of this.tools.values()) {
-      const props = (tool.parameters.properties as Record<string, unknown>) || tool.parameters;
+      const props =
+        (tool.parameters.properties as Record<string, unknown>) ||
+        tool.parameters;
       const req = (tool.parameters.required as string[]) || [];
       schemas.push({
         name: tool.name,
@@ -205,7 +217,15 @@ export abstract class BaseAgent {
    * Initialize agent context
    */
   protected async initializeContext(task: Task): Promise<AgentContext> {
-    const router = getModelRouter();
+    // getModelRouter() is a singleton — pass the real config on first
+    // construction so `defaults.preferLocal` actually takes effect (it's
+    // only read by the router's own constructor default otherwise).
+    const { defaults } = getConfigManager().get();
+    const router = getModelRouter({
+      preferLocal: defaults.preferLocal,
+      fallbackToPaid: defaults.fallbackToPaid,
+      maxPaidApiCalls: defaults.maxPaidApiCalls,
+    });
     const taskCategory = this.getTaskCategory();
     const routing = await router.route(taskCategory);
 
@@ -215,6 +235,7 @@ export abstract class BaseAgent {
     const context: AgentContext = {
       taskId: task.id,
       task,
+      conversationId,
       messages: [],
       toolResults: new Map(),
       memory,
@@ -226,6 +247,12 @@ export abstract class BaseAgent {
     this.state.status = "running";
     this.state.currentTask = task;
     this.state.startTime = new Date();
+    // Defensive reset — in practice every UniversalAgent is constructed
+    // fresh per task (see AgentSpawner/ParallelOrchestrator), so this
+    // shouldn't carry state across tasks, but initializeContext() is the
+    // one place that's true by construction rather than by convention.
+    this.compactionSummary = undefined;
+    this.compactedThroughIndex = 0;
 
     return context;
   }
@@ -240,6 +267,15 @@ export abstract class BaseAgent {
       role,
       content,
     });
+
+    // Best-effort — a memory-write failure must never break the agent loop.
+    try {
+      this.context.memory.recordTurn(this.context.conversationId, role, content);
+    } catch (err) {
+      this.logger.debug(
+        `Failed to record conversation turn: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -264,7 +300,7 @@ export abstract class BaseAgent {
 
     allMessages.push(...messages);
 
-    const truncatedMessages = this.truncateMessages(
+    const truncatedMessages = await this.truncateMessages(
       allMessages,
       this.config.maxTokens,
     );
@@ -287,7 +323,7 @@ export abstract class BaseAgent {
 
       const measuredStream = async function* (): AsyncIterable<StreamChunk> {
         let firstToken = true;
-        let collectedContent = '';
+        let collectedContent = "";
         let firstTokenTime = streamStartTime;
 
         for await (const chunk of originalStream) {
@@ -308,7 +344,7 @@ export abstract class BaseAgent {
 
         // After stream completes, record LLM call telemetry
         const streamDurationMs = Date.now() - streamStartTime;
-        const inputText = truncatedMessages.map((m) => m.content).join('\n');
+        const inputText = truncatedMessages.map((m) => m.content).join("\n");
         const estimatedInput = Math.ceil(inputText.length / 4);
         const estimatedOutput = Math.ceil(collectedContent.length / 4);
 
@@ -319,7 +355,16 @@ export abstract class BaseAgent {
           estimatedInput,
           estimatedOutput,
           streamDurationMs,
-          { content: collectedContent, usage: { inputTokens: estimatedInput, outputTokens: estimatedOutput, totalTokens: estimatedInput + estimatedOutput }, model, finishReason: 'stop' },
+          {
+            content: collectedContent,
+            usage: {
+              inputTokens: estimatedInput,
+              outputTokens: estimatedOutput,
+              totalTokens: estimatedInput + estimatedOutput,
+            },
+            model,
+            finishReason: "stop",
+          },
         );
       };
 
@@ -375,16 +420,18 @@ export abstract class BaseAgent {
         // Estimate: use the provider's countTokens or the rough estimate
         try {
           finalInput = this.context.provider.countTokens(
-            this.context.messages.map((m) => m.content).join('\n'),
+            this.context.messages.map((m) => m.content).join("\n"),
           );
           finalOutput = this.estimateTokenCount([
-            { role: 'assistant', content: result.content },
+            { role: "assistant", content: result.content },
           ]);
           finalTotal = finalInput + finalOutput;
         } catch {
           // Fall back to length-based estimate
           finalInput = Math.ceil(
-            this.context.messages.map((m) => this.extractTextContent(m.content)).join('\n').length / 4,
+            this.context.messages
+              .map((m) => this.extractTextContent(m.content))
+              .join("\n").length / 4,
           );
           finalOutput = Math.ceil(result.content.length / 4);
           finalTotal = finalInput + finalOutput;
@@ -395,10 +442,18 @@ export abstract class BaseAgent {
       let cost = 0;
       try {
         if (this.context) {
-          cost = this.context.provider.estimateCost(finalInput, finalOutput, model);
+          cost = this.context.provider.estimateCost(
+            finalInput,
+            finalOutput,
+            model,
+          );
         }
-      } catch {
-        // Cost estimation failure must never crash the agent
+      } catch (err) {
+        // Cost estimation failure must never crash the agent, but it does
+        // mean maxCost budget enforcement silently sees $0 for this call.
+        this.logger.debug(
+          `Cost estimation failed for ${model}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       collector.recordLLMCall(
@@ -411,20 +466,31 @@ export abstract class BaseAgent {
           completionTokens: finalOutput,
           totalTokens: finalTotal,
         },
-        durationMs,
         cost,
+        durationMs,
       );
-    } catch {
+    } catch (err) {
       // Telemetry failure must NEVER crash the agent
+      this.logger.debug(
+        `LLM call telemetry recording failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
-  protected truncateMessages(
+  /**
+   * The sole hot-path context-budget decision for what the model sees.
+   * Above the threshold, tries structured LLM-based compaction first
+   * (Compactor.ts) — a fixed-template summary of whatever's aging out of
+   * the recent window, merged into any existing summary. Falls back to
+   * pure heuristic truncation (drop what doesn't fit) if compaction fails,
+   * times out, or there's no active provider context to call.
+   */
+  protected async truncateMessages(
     messages: ChatMessage[],
     maxTokens: number,
-  ): ChatMessage[] {
+  ): Promise<ChatMessage[]> {
     const estimatedTokens = this.estimateTokenCount(messages);
-    const COMPACTION_THRESHOLD = 0.70; // Proactive compaction at 70% capacity
+    const COMPACTION_THRESHOLD = 0.7; // Proactive compaction at 70% capacity
     const effectiveLimit = Math.floor(maxTokens * COMPACTION_THRESHOLD);
 
     // If under 70%, no compaction needed
@@ -437,39 +503,85 @@ export abstract class BaseAgent {
 
     const systemMessages = messages.filter((m) => m.role === "system");
     const firstUserMsg = messages.find((m) => m.role === "user");
-    const nonSystemMessages = messages.filter((m) => m.role !== "system");
+    // Stable-indexed (append-only) history excluding system messages and
+    // the pinned first user message — compactedThroughIndex/recentStartIndex
+    // are positions into this array and stay valid turn-to-turn since
+    // messages are only ever appended, never reordered or removed.
+    const historyMessages = messages.filter(
+      (m) => m.role !== "system" && m !== firstUserMsg,
+    );
 
     // Reduce to 50% target size when compacting
-    const targetBudget = Math.floor(maxTokens * 0.50);
+    const targetBudget = Math.floor(maxTokens * 0.5);
     const systemBudget = Math.floor(targetBudget * 0.2);
     const conversationBudget = targetBudget - systemBudget;
 
     const recent: ChatMessage[] = [];
     let tokenCount = 0;
+    let recentStartIndex = historyMessages.length;
 
-    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
-      const msg = nonSystemMessages[i];
+    for (let i = historyMessages.length - 1; i >= 0; i--) {
+      const msg = historyMessages[i];
       const tokens = this.estimateTokenCount([msg]);
       if (tokenCount + tokens > conversationBudget) break;
       recent.unshift(msg);
       tokenCount += tokens;
+      recentStartIndex = i;
     }
 
-    const hasFirstUser = recent.some((m) => m === firstUserMsg);
-    const pinned = hasFirstUser
-      ? recent
-      : [firstUserMsg!, ...recent].filter(Boolean);
+    const pinnedHead = firstUserMsg ? [firstUserMsg] : [];
 
-    return [...systemMessages, ...pinned];
+    // Only messages aged out since the LAST compaction need summarizing —
+    // never re-send content that's already folded into compactionSummary.
+    const compactFrom = Math.min(this.compactedThroughIndex, recentStartIndex);
+    const newOlderMessages = historyMessages.slice(compactFrom, recentStartIndex);
+
+    if (newOlderMessages.length === 0) {
+      const summaryMsgs = this.compactionSummary
+        ? [renderSummaryMessage(this.compactionSummary)]
+        : [];
+      return [...systemMessages, ...pinnedHead, ...summaryMsgs, ...recent];
+    }
+
+    if (this.context) {
+      const outcome = await compactMessages(newOlderMessages, {
+        provider: this.context.provider,
+        model: this.context.model,
+        systemMessages,
+        existingSummary: this.compactionSummary,
+      });
+
+      if (outcome) {
+        this.compactionSummary = outcome.summary;
+        this.compactedThroughIndex = recentStartIndex;
+        return [
+          ...systemMessages,
+          ...pinnedHead,
+          renderSummaryMessage(outcome.summary),
+          ...recent,
+        ];
+      }
+    }
+
+    // Compaction unavailable or failed this turn — fall back to dropping
+    // the un-summarized older messages. compactedThroughIndex is NOT
+    // advanced, so this content is still eligible for a future compaction
+    // attempt rather than being permanently lost from the summary.
+    const summaryMsgs = this.compactionSummary
+      ? [renderSummaryMessage(this.compactionSummary)]
+      : [];
+    return [...systemMessages, ...pinnedHead, ...summaryMsgs, ...recent];
   }
 
   private extractTextContent(
-    content: string | import("../../providers/ProviderInterface.js").ContentBlock[],
+    content:
+      | string
+      | import("../../providers/ProviderInterface.js").ContentBlock[],
   ): string {
     if (typeof content === "string") return content;
     if (Array.isArray(content)) {
       return content
-        .map((block) => (block.type === "text" ? block.text ?? "" : ""))
+        .map((block) => (block.type === "text" ? (block.text ?? "") : ""))
         .join("\n");
     }
     return "";
@@ -485,6 +597,26 @@ export abstract class BaseAgent {
   }
 
   /**
+   * Builds the "Why" line shown in the permission prompt when the current
+   * task was flagged high-risk by TaskAnalyzer — reuses the riskFactors
+   * already stashed on task.metadata by AgentSpawner.executeTask(), rather
+   * than re-deriving anything here.
+   */
+  private buildRiskReason(): string | undefined {
+    const task = this.context?.task;
+    if (!task || task.risk !== "high") return undefined;
+
+    const riskFactors = task.metadata?.riskFactors as
+      | { value: number; description: string }[]
+      | undefined;
+    const hits = riskFactors?.filter((f) => f.value > 0).map((f) => f.description);
+
+    return hits && hits.length > 0
+      ? `Task flagged high-risk: ${hits.join("; ")}`
+      : "Task flagged high-risk";
+  }
+
+  /**
    * Execute a tool
    * Instrumented with telemetry: records timing, tool name/args, and success/error.
    */
@@ -492,17 +624,36 @@ export abstract class BaseAgent {
     name: string,
     params: Record<string, unknown>,
   ): Promise<unknown> {
-    const { getPermissionSystem } =
-      await import("../../utils/permission-system.js");
+    const hookManager = getHookManager();
+
+    // Pre-tool-use hooks are a hard safety rail (e.g. blocking `rm -rf`) and
+    // run before the interactive permission check — a hook block is not
+    // something the user gets prompted to override.
+    const preHookResult = await hookManager.execute("pre-tool-use", {
+      toolName: name,
+      params,
+    });
+
+    if (preHookResult.skip) {
+      return {
+        success: false,
+        output: preHookResult.error || `Blocked by pre-tool-use hook: ${name}`,
+      };
+    }
+
+    const effectiveParams =
+      (preHookResult.modifiedData?.params as Record<string, unknown>) ?? params;
+
     const permissionSystem = getPermissionSystem();
 
-    const check = permissionSystem.checkPermission(name, params);
+    const check = permissionSystem.checkPermission(name, effectiveParams);
     if (!check.allowed) {
       if (check.requiresPrompt) {
         const approved = await permissionSystem.requestPermission({
           tool: name,
-          params,
+          params: effectiveParams,
           description: check.description,
+          riskReason: this.buildRiskReason(),
         });
         if (!approved) {
           return { success: false, output: `Permission denied for: ${name}` };
@@ -531,19 +682,55 @@ export abstract class BaseAgent {
     const toolStartTime = Date.now();
     let toolSuccess = true;
     let toolError: string | undefined;
+    let toolResultValue: unknown;
 
     try {
-      const result = await tool.execute(params);
+      const rawResult = await tool.execute(effectiveParams);
+      const result = this.scrubToolResult(rawResult);
+      toolResultValue = result;
       this.toolCallCount++;
       this.context?.toolResults.set(`${name}_${Date.now()}`, result);
       return result;
     } catch (err) {
       toolSuccess = false;
       toolError = err instanceof Error ? err.message : String(err);
+
+      await hookManager
+        .execute("on-error", {
+          error: err,
+          toolName: name,
+          taskId: this.context?.taskId,
+          agentType: this.type,
+        })
+        .catch(() => {
+          // Hook failures must never mask the original tool error
+        });
+
       throw err; // Re-throw — caller handles the error
     } finally {
+      const durationMs = Date.now() - toolStartTime;
+
+      await hookManager
+        .execute("post-tool-use", {
+          toolName: name,
+          params: effectiveParams,
+          duration: durationMs,
+          success: toolSuccess,
+          result: toolResultValue,
+          error: toolError,
+        })
+        .catch(() => {
+          // Hook failures must never crash the agent
+        });
+
       // Always record telemetry (even on error)
-      this.safeRecordToolCall(name, params, toolStartTime, toolSuccess, toolError);
+      this.safeRecordToolCall(
+        name,
+        effectiveParams,
+        toolStartTime,
+        toolSuccess,
+        toolError,
+      );
     }
   }
 
@@ -576,9 +763,37 @@ export abstract class BaseAgent {
         durationMs,
         error,
       );
-    } catch {
+    } catch (err) {
       // Telemetry failure must NEVER crash the agent
+      this.logger.debug(
+        `Tool call telemetry recording failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
+  }
+
+  /**
+   * Scrub secret-shaped values (API keys, tokens, Bearer headers) out of a
+   * tool's own result before it's stored or returned — this is the boundary
+   * where a raw secret (e.g. printed by `env` or `cat .env`) would otherwise
+   * flow straight into the LLM conversation. Distinct from redactToolArgs()
+   * below, which only ever fed the telemetry payload, not the conversation.
+   */
+  private scrubToolResult(result: unknown): unknown {
+    if (typeof result !== "object" || result === null) return result;
+    const r = result as { output?: unknown; metadata?: Record<string, unknown> };
+    const scrubbed: Record<string, unknown> = { ...(result as object) };
+
+    if (typeof r.output === "string") {
+      scrubbed.output = scrubSecrets(r.output);
+    }
+    if (r.metadata && typeof r.metadata === "object") {
+      const metadata: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(r.metadata)) {
+        metadata[key] = typeof value === "string" ? scrubSecrets(value) : value;
+      }
+      scrubbed.metadata = metadata;
+    }
+    return scrubbed;
   }
 
   /**
@@ -594,19 +809,28 @@ export abstract class BaseAgent {
 
     for (const [key, value] of Object.entries(params)) {
       // Truncate string values that are too long
-      if (typeof value === 'string') {
-        if (key === 'command' || key === 'cmd') {
-          redacted[key] = value.length > 200
-            ? value.substring(0, 197) + '...'
-            : value;
-        } else if ((key === 'content' || key === 'data') && value.length > 500) {
-          redacted[key] = value.substring(0, 497) + '...';
+      if (typeof value === "string") {
+        if (key === "command" || key === "cmd") {
+          redacted[key] =
+            value.length > 200 ? value.substring(0, 197) + "..." : value;
+        } else if (
+          (key === "content" || key === "data") &&
+          value.length > 500
+        ) {
+          redacted[key] = value.substring(0, 497) + "...";
         } else {
           redacted[key] = value;
         }
-      } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      } else if (
+        typeof value === "object" &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
         // Recursively redact nested objects
-        redacted[key] = this.redactToolArgs(name, value as Record<string, unknown>);
+        redacted[key] = this.redactToolArgs(
+          name,
+          value as Record<string, unknown>,
+        );
       } else {
         redacted[key] = value;
       }

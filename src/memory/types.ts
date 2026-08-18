@@ -16,12 +16,19 @@ export type MemoryType =
 
 export type MemoryPriority = "low" | "medium" | "high" | "critical";
 
+/** Who the entry is about: "user" (preferences, cross-task) or "project"
+ * (facts/patterns/decisions about this codebase). Not a third "session"
+ * value — current-session memory is already covered by SessionCache
+ * (in-memory until flush) + conversation_turns (durable per-turn log). */
+export type MemoryScope = "user" | "project";
+
 export interface MemoryEntry {
   id: string;
   type: MemoryType;
   content: string;
   metadata: MemoryMetadata;
   embedding?: number[];
+  scope: MemoryScope;
   createdAt: Date;
   updatedAt: Date;
   expiresAt?: Date;
@@ -41,6 +48,7 @@ export interface MemoryMetadata {
 
 export interface MemoryQuery {
   type?: MemoryType;
+  scope?: MemoryScope;
   tags?: string[];
   text?: string;
   embedding?: number[];
@@ -77,26 +85,6 @@ export interface ConversationRecord {
   summary?: string;
   embedding?: number[];
   metadata?: Record<string, unknown>;
-}
-
-// ============================================================================
-// Context Window Types
-// ============================================================================
-
-export interface ContextWindow {
-  id: string;
-  maxSize: number;
-  currentSize: number;
-  entries: MemoryEntry[];
-  summary?: string;
-  lastCompacted?: Date;
-  priorityMap?: Record<string, number>;
-}
-
-export interface ContextCompactionResult {
-  removedEntries: number;
-  retainedSize: number;
-  summary: string;
 }
 
 // ============================================================================
@@ -137,32 +125,6 @@ export interface ProjectMemoryConfig {
   memoryDir: string;
   maxFileSize: number;
   autoSave: boolean;
-}
-
-export interface MemoryFile {
-  path: string;
-  type: MemoryType;
-  content: string;
-  lastModified: Date;
-}
-
-export interface PatternFile {
-  patterns: PatternRecord[];
-  lastUpdated: Date;
-}
-
-export interface DecisionFile {
-  decisions: DecisionRecord[];
-  lastUpdated: Date;
-}
-
-export interface DecisionRecord {
-  id: string;
-  date: Date;
-  decision: string;
-  rationale: string;
-  alternatives?: string[];
-  impact?: string;
 }
 
 // ============================================================================

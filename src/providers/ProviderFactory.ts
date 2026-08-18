@@ -126,42 +126,6 @@ export class ProviderFactory {
   }
 
   /**
-   * Get best available provider for a task type
-   * Respects preferLocal and fallbackToPaid settings
-   */
-  async getBestProvider(
-    taskType: "simple" | "code" | "complex",
-  ): Promise<BaseProvider> {
-    const { preferLocal, fallbackToPaid } = this.options;
-
-    // Priority order based on settings
-    const priority: ProviderType[] = preferLocal
-      ? ["local", "gemini", "openai", "claude"]
-      : ["claude", "openai", "gemini", "local"];
-
-    // Filter out paid APIs if fallbackToPaid is false
-    const candidates: ProviderType[] = fallbackToPaid
-      ? priority
-      : preferLocal
-        ? ["local"] // Local only if fallbackToPaid is false
-        : priority;
-
-    for (const type of candidates) {
-      const available = await this.isAvailable(type);
-      if (available) {
-        this.logger.info(`Using ${type} provider for ${taskType} task`);
-        return this.get(type);
-      }
-    }
-
-    throw new ProviderError("No available providers found", "local", {
-      hint: preferLocal
-        ? "Ensure Ollama is running (ollama serve) or enable fallbackToPaid"
-        : "Set API keys for paid providers (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY)",
-    });
-  }
-
-  /**
    * Get all available providers
    */
   async getAvailable(): Promise<BaseProvider[]> {

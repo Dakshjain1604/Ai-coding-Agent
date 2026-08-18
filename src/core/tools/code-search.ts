@@ -382,10 +382,17 @@ function searchFiles(
   const results: string[] = [];
   const regex = new RegExp(pattern.replace(/\*/g, ".*"));
 
+  // Always skip these regardless of the caller's `exclude` list — without
+  // this, an agent calling search_files with no exclude recurses into
+  // node_modules on every real project and can hang for minutes.
+  const ALWAYS_SKIP = ["node_modules", ".git", "dist", "build"];
+
   function walk(currentDir: string) {
     const entries = readdirSync(currentDir);
 
     for (const entry of entries) {
+      if (ALWAYS_SKIP.includes(entry)) continue;
+
       const fullPath = join(currentDir, entry);
       const relativePath = fullPath.replace(dir, "").replace(/^\//, "");
 

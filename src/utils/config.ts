@@ -59,6 +59,8 @@ const DefaultsSchema = z.object({
   complexityThreshold: z.number().default(0.7),
   maxPaidApiCalls: z.number().default(0),
   outputDir: z.string().default("output"),
+  /** Stream LLM tokens to the terminal as they arrive, instead of buffering the full response. */
+  streaming: z.boolean().default(true),
 });
 
 const AppConfigSchema = z.object({
@@ -319,6 +321,7 @@ export class ConfigManager {
         complexityThreshold: 0.7,
         maxPaidApiCalls: 0,
         outputDir: "output",
+        streaming: true,
       },
     };
   }
@@ -409,41 +412,17 @@ export class ConfigManager {
     return result;
   }
 
-  private toYaml(config: AppConfig): string {
-    // Simple YAML serialization
-    const lines: string[] = [];
+}
 
-    lines.push("# CodingAgent Configuration");
-    lines.push("");
-    lines.push("defaults:");
-    lines.push(`  preferLocal: ${config.defaults.preferLocal}`);
-    lines.push(`  fallbackToPaid: ${config.defaults.fallbackToPaid}`);
-    lines.push(`  maxParallelAgents: ${config.defaults.maxParallelAgents}`);
-    lines.push(`  complexityThreshold: ${config.defaults.complexityThreshold}`);
-    lines.push(`  maxPaidApiCalls: ${config.defaults.maxPaidApiCalls}`);
-    lines.push("");
-
-    lines.push("providers:");
-    for (const provider of config.providers) {
-      lines.push(`  - type: ${provider.type}`);
-      if (provider.baseUrl) lines.push(`    baseUrl: ${provider.baseUrl}`);
-      if (provider.apiKey) lines.push(`    apiKey: ${provider.apiKey}`);
-      lines.push(`    enabled: ${provider.enabled}`);
-    }
-    lines.push("");
-
-    lines.push("agents:");
-    for (const [type, agentConfig] of Object.entries(config.agents)) {
-      lines.push(`  ${type}:`);
-      lines.push(`    model: ${agentConfig.model}`);
-      lines.push(`    maxTokens: ${agentConfig.maxTokens}`);
-      lines.push(`    tools: [${agentConfig.tools.join(", ")}]`);
-      lines.push(`    maxIterations: ${agentConfig.maxIterations}`);
-      lines.push(`    timeout: ${agentConfig.timeout}`);
-    }
-
-    return lines.join("\n");
-  }
+/**
+ * Mask a secret value for display — never for storage or provider routing,
+ * which both need the real value. Short values are fully masked since a
+ * partial reveal would leak most of a short key.
+ */
+export function maskApiKey(key?: string): string {
+  if (!key) return "";
+  if (key.length <= 8) return "***";
+  return `${key.slice(0, 3)}...${key.slice(-4)}`;
 }
 
 // Singleton instance

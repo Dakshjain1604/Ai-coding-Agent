@@ -1,5 +1,11 @@
 /**
  * Orchestrator Module Exports
+ *
+ * PlanManager and ResultSynthesizer were retired (Wiring Audit fix #6) —
+ * both were 100% unreferenced outside their own files. Multi-agent
+ * decomposition now happens via ParallelOrchestrator, exposed to the agent
+ * loop as the `spawn_subagent` tool (see core/tools/subagent-tool.ts),
+ * rather than a separate CLI-level orchestration path.
  */
 
 import { TaskAnalyzer, createTaskAnalyzer } from "./TaskAnalyzer.js";
@@ -13,17 +19,10 @@ import {
 import type { SpawnedAgent, SpawnOptions } from "./AgentSpawner.js";
 
 import {
-  ResultSynthesizer,
-  createResultSynthesizer,
-} from "./ResultSynthesizer.js";
-import type {
-  SynthesisOptions,
-  SynthesisResult,
-  Conflict,
-} from "./ResultSynthesizer.js";
-
-import { PlanManager, createPlanManager } from "./PlanManager.js";
-import type { Plan, PlanStep, PlanProgress } from "./PlanManager.js";
+  ParallelOrchestrator,
+  getParallelOrchestrator,
+} from "./ParallelOrchestrator.js";
+import type { SubTaskPlan } from "./ParallelOrchestrator.js";
 
 export { TaskAnalyzer, createTaskAnalyzer };
 export type { AnalysisResult, AnalysisFactor };
@@ -31,11 +30,8 @@ export type { AnalysisResult, AnalysisFactor };
 export { AgentSpawner, createAgentSpawner, executeTask };
 export type { SpawnedAgent, SpawnOptions };
 
-export { ResultSynthesizer, createResultSynthesizer };
-export type { SynthesisOptions, SynthesisResult, Conflict };
-
-export { PlanManager, createPlanManager };
-export type { Plan as ExecutionPlan, PlanStep as ExecutionStep, PlanProgress };
+export { ParallelOrchestrator, getParallelOrchestrator };
+export type { SubTaskPlan };
 
 // Singleton instances
 let taskAnalyzerInstance: TaskAnalyzer | null = null;

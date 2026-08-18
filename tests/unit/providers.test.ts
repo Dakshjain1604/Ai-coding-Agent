@@ -21,4 +21,26 @@ describe("Provider Factory & Model Router", () => {
     const available = await provider.isAvailable();
     expect(typeof available).toBe("boolean");
   });
+
+  // Regression test for the Wiring Audit's "local-first" routing bug:
+  // DEFAULT_RULES used to be a static, module-level table that always
+  // pointed at openrouter, regardless of the `preferLocal` config passed
+  // to the router's constructor. Verifies the fix without needing a real
+  // Ollama server — this checks which default rule is *selected*, not
+  // whether the provider actually responds.
+  it("selects local-first default rules when preferLocal is true", () => {
+    const router = new ModelRouter({ preferLocal: true });
+    const rules = (router as unknown as { defaultRules: Array<{ taskCategory: string; provider: string }> })
+      .defaultRules;
+    const codeRule = rules.find((r) => r.taskCategory === "code");
+    expect(codeRule?.provider).toBe("local");
+  });
+
+  it("selects cloud-first default rules when preferLocal is false", () => {
+    const router = new ModelRouter({ preferLocal: false });
+    const rules = (router as unknown as { defaultRules: Array<{ taskCategory: string; provider: string }> })
+      .defaultRules;
+    const codeRule = rules.find((r) => r.taskCategory === "code");
+    expect(codeRule?.provider).toBe("openrouter");
+  });
 });

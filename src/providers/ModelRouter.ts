@@ -9,13 +9,11 @@ import { ProviderFactory } from "./ProviderFactory.js";
 import { BaseProvider } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";
 import chalk from "chalk";
+import { getModelFor } from "./ProviderRegistry.js";
+import { getModelCatalog } from "./ModelCatalog.js";
 
-export type TaskCategory =
-  | "simple"
-  | "code"
-  | "complex"
-  | "reasoning"
-  | "embedding";
+export type { TaskCategory } from "./ProviderRegistry.js";
+import type { TaskCategory } from "./ProviderRegistry.js";
 export type CostPreference = "free" | "cheap" | "balanced" | "quality";
 
 export interface RoutingRule {
@@ -41,10 +39,13 @@ export interface RoutingConfig {
 }
 
 /**
- * Default routing rules
- * Priority: OpenRouter (stepfun) -> Groq -> Error (no local fallback)
+ * Default routing rules when local-first is disabled.
+ * Priority: OpenRouter (stepfun free model) -> Groq -> paid fallbacks.
+ * When `preferLocal` is true, ModelRouter builds a local-first variant of
+ * these rules instead (see `buildDefaultRules`) — this table is only used
+ * as the non-local-first branch.
  */
-const DEFAULT_RULES: RoutingRule[] = [
+const CLOUD_FIRST_RULES: RoutingRule[] = [
   {
     taskCategory: "simple",
     provider: "openrouter",
@@ -64,6 +65,28 @@ const DEFAULT_RULES: RoutingRule[] = [
     taskCategory: "reasoning",
     provider: "openrouter",
     model: "stepfun/step-3.5-flash:free",
+  },
+  { taskCategory: "embedding", provider: "local", model: "nomic-embed-text" },
+];
+
+/**
+ * Local-first routing rules — used whenever `preferLocal` is true (the
+ * project default). Availability is still checked per-call in route(); if
+ * Ollama isn't actually running, route() falls through to routeToFallback(),
+ * which also tries local first before any cloud provider.
+ */
+const LOCAL_FIRST_RULES: RoutingRule[] = [
+  { taskCategory: "simple", provider: "local", model: "qwen2.5-coder:latest" },
+  { taskCategory: "code", provider: "local", model: "qwen2.5-coder:latest" },
+  {
+    taskCategory: "complex",
+    provider: "local",
+    model: "qwen2.5-coder:latest",
+  },
+  {
+    taskCategory: "reasoning",
+    provider: "local",
+    model: "qwen2.5-coder:latest",
   },
   { taskCategory: "embedding", provider: "local", model: "nomic-embed-text" },
 ];
@@ -135,13 +158,13 @@ const MODEL_SPECS: Record<
   },
 
   // Groq - Free tier (6000 tokens/min)
-  "llama-3.1-8b-instant": {
+  "openai/gpt-oss-20b": {
     contextLength: 128000,
     cost: 0,
     quality: 0.82,
     speed: 0.98,
   },
-  "llama-3.3-70b-versatile": {
+  "openai/gpt-oss-120b": {
     contextLength: 128000,
     cost: 0,
     quality: 0.92,
@@ -178,15 +201,12 @@ const MODEL_SPECS: Record<
 export class ModelRouter {
   private factory: ProviderFactory;
   private config: RoutingConfig;
+  private defaultRules: RoutingRule[];
   private callCount: Map<ProviderType, number> = new Map();
   private logger = getLogger();
+  private modelCatalog = getModelCatalog();
 
   constructor(config?: Partial<RoutingConfig>) {
-    this.factory = ProviderFactory.getInstance({
-      preferLocal: config?.preferLocal ?? false,
-      fallbackToPaid: config?.fallbackToPaid ?? true,
-    });
-
     this.config = {
       preferLocal: false,
       fallbackToPaid: true,
@@ -195,6 +215,15 @@ export class ModelRouter {
       customRules: [],
       ...config,
     };
+
+    this.factory = ProviderFactory.getInstance({
+      preferLocal: this.config.preferLocal,
+      fallbackToPaid: this.config.fallbackToPaid,
+    });
+
+    this.defaultRules = this.config.preferLocal
+      ? LOCAL_FIRST_RULES
+      : CLOUD_FIRST_RULES;
   }
 
   /**
@@ -203,37 +232,49 @@ export class ModelRouter {
   async route(
     taskCategory: TaskCategory,
     estimatedTokens: number = 1000,
-    options?: { preferQuality?: boolean; preferSpeed?: boolean },
+    options?: {
+      preferQuality?: boolean;
+      preferSpeed?: boolean;
+      // Providers to skip even if otherwise available — for re-routing
+      // after a provider passed its availability probe but then failed on
+      // an actual request (isAvailable() caches its result and won't
+      // re-probe, so without this a naive retry just re-selects the same
+      // provider that just failed).
+      exclude?: ProviderType[];
+    },
   ): Promise<RoutingResult> {
     // Check for custom rule first
     const customRule = this.config.customRules.find(
       (r) => r.taskCategory === taskCategory,
     );
-    if (customRule && customRule.provider && customRule.model) {
+    if (
+      customRule &&
+      customRule.provider &&
+      customRule.model &&
+      !options?.exclude?.includes(customRule.provider)
+    ) {
       return this.routeToRule(customRule, estimatedTokens);
     }
 
-    // Check default rules
-    const defaultRule = DEFAULT_RULES.find(
+    // Check default rules (local-first or cloud-first, per this.config.preferLocal)
+    const defaultRule = this.defaultRules.find(
       (r) => r.taskCategory === taskCategory,
     );
-    if (defaultRule) {
+    if (defaultRule && !options?.exclude?.includes(defaultRule.provider!)) {
       const providerType = this.resolveProvider(defaultRule.provider!);
 
       // Check if provider is available
       const available = await this.factory.isAvailable(providerType);
       if (!available) {
-        return this.routeToFallback(taskCategory, estimatedTokens);
+        return this.routeToFallback(
+          taskCategory,
+          estimatedTokens,
+          options?.exclude,
+        );
       }
 
       const provider = await this.factory.get(providerType);
       const model = defaultRule.model!;
-      const spec = MODEL_SPECS[model] ?? {
-        contextLength: 8192,
-        cost: 0,
-        quality: 0.7,
-        speed: 0.7,
-      };
 
       // Adjust based on preferences
       const finalModel = options?.preferQuality
@@ -245,13 +286,16 @@ export class ModelRouter {
       return {
         provider,
         model: finalModel,
-        estimatedCost: this.estimateCost(finalModel, estimatedTokens),
-        estimatedLatency: this.estimateLatency(finalModel, estimatedTokens),
+        estimatedCost: await this.estimateCost(finalModel, estimatedTokens),
+        estimatedLatency: await this.estimateLatency(
+          finalModel,
+          estimatedTokens,
+        ),
       };
     }
 
     // No rule found - use best available
-    return this.routeToBest(taskCategory, estimatedTokens);
+    return this.routeToBest(taskCategory, estimatedTokens, options?.exclude);
   }
 
   /**
@@ -271,18 +315,12 @@ export class ModelRouter {
     }
 
     const provider = await this.factory.get(providerType);
-    const spec = MODEL_SPECS[model] ?? {
-      contextLength: 8192,
-      cost: 0,
-      quality: 0.7,
-      speed: 0.7,
-    };
 
     return {
       provider,
       model,
-      estimatedCost: this.estimateCost(model, estimatedTokens),
-      estimatedLatency: this.estimateLatency(model, estimatedTokens),
+      estimatedCost: await this.estimateCost(model, estimatedTokens),
+      estimatedLatency: await this.estimateLatency(model, estimatedTokens),
     };
   }
 
@@ -344,6 +382,11 @@ export class ModelRouter {
       preferLocal: config.preferLocal,
       fallbackToPaid: config.fallbackToPaid,
     });
+    if (config.preferLocal !== undefined) {
+      this.defaultRules = this.config.preferLocal
+        ? LOCAL_FIRST_RULES
+        : CLOUD_FIRST_RULES;
+    }
   }
 
   // ============================================================================
@@ -361,14 +404,15 @@ export class ModelRouter {
     return {
       provider,
       model,
-      estimatedCost: this.estimateCost(model, estimatedTokens),
-      estimatedLatency: this.estimateLatency(model, estimatedTokens),
+      estimatedCost: await this.estimateCost(model, estimatedTokens),
+      estimatedLatency: await this.estimateLatency(model, estimatedTokens),
     };
   }
 
   private async routeToFallback(
     taskCategory: TaskCategory,
     estimatedTokens: number,
+    exclude?: ProviderType[],
   ): Promise<RoutingResult> {
     // Fallback order: Local → Groq (free) → OpenRouter (free) → Paid providers
     const fallbackOrder: ProviderType[] = [
@@ -380,29 +424,38 @@ export class ModelRouter {
       "claude",
     ];
 
-    const lastFailReason = "";
-
     for (const providerType of fallbackOrder) {
+      if (exclude?.includes(providerType)) continue;
       try {
         const isAvail = await this.factory.isAvailable(providerType);
-        if (isAvail) {
-          const provider = await this.factory.get(providerType);
-          const model = this.getDefaultModelForCategory(
-            providerType,
-            taskCategory,
-          );
-
-          console.log(chalk.gray(`  • Falling back to ${providerType}...`));
-
-          return {
-            provider,
-            model,
-            estimatedCost: this.estimateCost(model, estimatedTokens),
-            estimatedLatency: this.estimateLatency(model, estimatedTokens),
-          };
+        if (!isAvail) {
+          this.logger.debug(`${providerType} unavailable, trying next fallback`);
+          continue;
         }
-      } catch {
-        // Provider not available, continue to next
+
+        const provider = await this.factory.get(providerType);
+        const model = this.getDefaultModelForCategory(
+          providerType,
+          taskCategory,
+        );
+
+        console.log(chalk.gray(`  • Falling back to ${providerType}...`));
+
+        return {
+          provider,
+          model,
+          estimatedCost: await this.estimateCost(model, estimatedTokens),
+          estimatedLatency: await this.estimateLatency(
+            model,
+            estimatedTokens,
+          ),
+        };
+      } catch (err) {
+        this.logger.debug(
+          `${providerType} threw during fallback routing, trying next: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
       }
     }
 
@@ -414,10 +467,11 @@ export class ModelRouter {
   private async routeToBest(
     taskCategory: TaskCategory,
     estimatedTokens: number,
+    exclude?: ProviderType[],
   ): Promise<RoutingResult> {
-    // Skip local/Ollama entirely - go directly to cloud providers
-    // Fallback order: Groq (free) → OpenRouter (free) → Paid providers
-    return this.routeToFallback(taskCategory, estimatedTokens);
+    // No default/custom rule matched this category — delegate to the same
+    // local-first fallback order used when a rule's provider is unavailable.
+    return this.routeToFallback(taskCategory, estimatedTokens, exclude);
   }
 
   private resolveProvider(type: ProviderType): ProviderType {
@@ -425,262 +479,85 @@ export class ModelRouter {
     return type === "ollama" ? "local" : type;
   }
 
+  /**
+   * Model selection for all three tiers now lives in ProviderRegistry.ts —
+   * this used to be three ~90-line near-duplicate switch tables here.
+   */
   private getDefaultModelForCategory(
     providerType: ProviderType,
     taskCategory: TaskCategory,
   ): string {
-    const modelMap: Record<ProviderType, Record<TaskCategory, string>> = {
-      local: {
-        simple: "qwen2.5-coder:latest",
-        code: "qwen2.5-coder:latest",
-        complex: "qwen2.5-coder:latest",
-        reasoning: "qwen2.5-coder:latest",
-        embedding: "nomic-embed-text",
-      },
-      claude: {
-        simple: "claude-haiku-4-5-20251001",
-        code: "claude-sonnet-4-6",
-        complex: "claude-opus-4-6",
-        reasoning: "claude-opus-4-6",
-        embedding: "claude-haiku-4-5-20251001", // Claude doesn't have embeddings
-      },
-      openai: {
-        simple:
-          !process.env.OPENAI_API_KEY &&
-          (Boolean(process.env.NVIDIA_API_KEY) ||
-            Boolean(process.env.NVAPI_KEY))
-            ? "meta/llama-3.1-8b-instruct"
-            : "gpt-4o-mini",
-        code:
-          !process.env.OPENAI_API_KEY &&
-          (Boolean(process.env.NVIDIA_API_KEY) ||
-            Boolean(process.env.NVAPI_KEY))
-            ? "meta/llama-3.1-8b-instruct"
-            : "gpt-4o",
-        complex:
-          !process.env.OPENAI_API_KEY &&
-          (Boolean(process.env.NVIDIA_API_KEY) ||
-            Boolean(process.env.NVAPI_KEY))
-            ? "meta/llama-3.1-8b-instruct"
-            : "o1-preview",
-        reasoning:
-          !process.env.OPENAI_API_KEY &&
-          (Boolean(process.env.NVIDIA_API_KEY) ||
-            Boolean(process.env.NVAPI_KEY))
-            ? "meta/llama-3.1-8b-instruct"
-            : "o1-preview",
-        embedding: "text-embedding-3-small",
-      },
-      gemini: {
-        simple: "gemini-2.0-flash",
-        code: "gemini-2.0-flash",
-        complex: "gemini-2.0-pro",
-        reasoning: "gemini-2.0-pro",
-        embedding: "text-embedding-004",
-      },
-      ollama: {
-        simple: "qwen2.5-coder:latest",
-        code: "qwen2.5-coder:latest",
-        complex: "qwen2.5-coder:latest",
-        reasoning: "qwen2.5-coder:latest",
-        embedding: "nomic-embed-text",
-      },
-      groq: {
-        simple: "llama-3.1-8b-instant",
-        code: "llama-3.3-70b-versatile",
-        complex: "llama-3.3-70b-versatile",
-        reasoning: "llama-3.3-70b-versatile",
-        embedding: "text-embedding-3-small",
-      },
-      openrouter: {
-        simple: "stepfun/step-3.5-flash:free",
-        code: "stepfun/step-3.5-flash:free",
-        complex: "stepfun/step-3.5-flash:free",
-        reasoning: "stepfun/step-3.5-flash:free",
-        embedding: "google/gemma-2-9b-it:free",
-      },
-      huggingface: {
-        simple: "meta-llama/Llama-3.2-1B-Instruct",
-        code: "meta-llama/Llama-3.2-3B-Instruct",
-        complex: "Qwen/Qwen2.5-7B-Instruct",
-        reasoning: "Qwen/Qwen2.5-7B-Instruct",
-        embedding: "BAAI/bge-small-en-v1.5",
-      },
-      "ollama-cloud": {
-        simple: "llama3.2",
-        code: "llama3.2",
-        complex: "llama3.1",
-        reasoning: "llama3.1",
-        embedding: "nomic-embed-text",
-      },
-    };
-
-    return (
-      modelMap[providerType]?.[taskCategory] ?? modelMap.local[taskCategory]
-    );
+    return getModelFor(providerType, "default", taskCategory);
   }
 
   private getBetterModel(
     taskCategory: TaskCategory,
     providerType: ProviderType,
   ): string {
-    const qualityMap: Record<ProviderType, Record<TaskCategory, string>> = {
-      local: {
-        simple: "qwen2.5-coder:latest",
-        code: "qwen2.5-coder:latest",
-        complex: "qwen2.5-coder:latest",
-        reasoning: "qwen2.5-coder:latest",
-        embedding: "nomic-embed-text",
-      },
-      claude: {
-        simple: "claude-sonnet-4-6",
-        code: "claude-opus-4-6",
-        complex: "claude-opus-4-6",
-        reasoning: "claude-opus-4-6",
-        embedding: "claude-haiku-4-5-20251001",
-      },
-      openai: {
-        simple: "gpt-4o",
-        code: "o1-preview",
-        complex: "o1-preview",
-        reasoning: "o1-preview",
-        embedding: "text-embedding-3-large",
-      },
-      gemini: {
-        simple: "gemini-2.0-pro",
-        code: "gemini-2.0-pro",
-        complex: "gemini-2.0-pro",
-        reasoning: "gemini-2.0-pro",
-        embedding: "text-embedding-004",
-      },
-      ollama: {
-        simple: "qwen2.5-coder:latest",
-        code: "qwen2.5-coder:latest",
-        complex: "qwen2.5-coder:latest",
-        reasoning: "qwen2.5-coder:latest",
-        embedding: "nomic-embed-text",
-      },
-      groq: {
-        simple: "llama-3.3-70b-versatile",
-        code: "llama-3.3-70b-versatile",
-        complex: "llama-3.3-70b-versatile",
-        reasoning: "llama-3.3-70b-versatile",
-        embedding: "text-embedding-3-small",
-      },
-      openrouter: {
-        simple: "meta-llama/llama-3.1-70b-instruct",
-        code: "meta-llama/llama-3.1-70b-instruct",
-        complex: "meta-llama/llama-3.1-70b-instruct",
-        reasoning: "meta-llama/llama-3.1-70b-instruct",
-        embedding: "google/gemma-2-9b-8192-it",
-      },
-      huggingface: {
-        simple: "Qwen/Qwen2.5-Coder-3B-Instruct",
-        code: "Qwen/Qwen2.5-7B-Instruct",
-        complex: "Qwen/Qwen2.5-7B-Instruct",
-        reasoning: "Qwen/Qwen2.5-7B-Instruct",
-        embedding: "BAAI/bge-small-en-v1.5",
-      },
-      "ollama-cloud": {
-        simple: "llama3.2",
-        code: "llama3.2",
-        complex: "llama3.1",
-        reasoning: "llama3.1",
-        embedding: "nomic-embed-text",
-      },
-    };
-
-    return (
-      qualityMap[providerType]?.[taskCategory] ??
-      this.getDefaultModelForCategory(providerType, taskCategory)
-    );
+    return getModelFor(providerType, "quality", taskCategory);
   }
 
   private getFasterModel(
     taskCategory: TaskCategory,
     providerType: ProviderType,
   ): string {
-    const speedMap: Record<ProviderType, Record<TaskCategory, string>> = {
-      local: {
-        simple: "qwen2.5-coder:latest",
-        code: "qwen2.5-coder:latest",
-        complex: "qwen2.5-coder:latest",
-        reasoning: "qwen2.5-coder:latest",
-        embedding: "nomic-embed-text",
-      },
-      claude: {
-        simple: "claude-haiku-4-5-20251001",
-        code: "claude-haiku-4-5-20251001",
-        complex: "claude-sonnet-4-6",
-        reasoning: "claude-sonnet-4-6",
-        embedding: "claude-haiku-4-5-20251001",
-      },
-      openai: {
-        simple: "gpt-4o-mini",
-        code: "gpt-4o-mini",
-        complex: "gpt-4o",
-        reasoning: "gpt-4o",
-        embedding: "text-embedding-3-small",
-      },
-      gemini: {
-        simple: "gemini-2.0-flash",
-        code: "gemini-2.0-flash",
-        complex: "gemini-2.0-flash",
-        reasoning: "gemini-2.0-flash",
-        embedding: "text-embedding-004",
-      },
-      ollama: {
-        simple: "qwen2.5-coder:latest",
-        code: "qwen2.5-coder:latest",
-        complex: "qwen2.5-coder:latest",
-        reasoning: "qwen2.5-coder:latest",
-        embedding: "nomic-embed-text",
-      },
-      groq: {
-        simple: "llama-3.1-8b-instant",
-        code: "llama-3.1-8b-instant",
-        complex: "llama-3.3-70b-versatile",
-        reasoning: "llama-3.1-8b-instant",
-        embedding: "text-embedding-3-small",
-      },
-      openrouter: {
-        simple: "google/gemma-2-9b-8192-it",
-        code: "google/gemma-2-9b-8192-it",
-        complex: "meta-llama/llama-3.1-8b-instruct",
-        reasoning: "google/gemma-2-9b-8192-it",
-        embedding: "google/gemma-2-9b-8192-it",
-      },
-      huggingface: {
-        simple: "meta-llama/Llama-3.2-1B-Instruct",
-        code: "meta-llama/Llama-3.2-1B-Instruct",
-        complex: "Qwen/Qwen2.5-Coder-3B-Instruct",
-        reasoning: "meta-llama/Llama-3.2-1B-Instruct",
-        embedding: "BAAI/bge-small-en-v1.5",
-      },
-      "ollama-cloud": {
-        simple: "llama3.2",
-        code: "llama3.2",
-        complex: "llama3.2",
-        reasoning: "llama3.2",
-        embedding: "nomic-embed-text",
-      },
-    };
-
-    return (
-      speedMap[providerType]?.[taskCategory] ??
-      this.getDefaultModelForCategory(providerType, taskCategory)
-    );
+    return getModelFor(providerType, "speed", taskCategory);
   }
 
-  private estimateCost(model: string, tokens: number): number {
-    const spec = MODEL_SPECS[model];
-    if (!spec || spec.cost === 0) return 0;
+  /**
+   * Resolves a model's cost/context spec: the fetched+cached ModelCatalog
+   * first, MODEL_SPECS (hand-maintained, always available) as the offline
+   * fallback. Catalog data doesn't carry quality/speed scores, so those
+   * always come from MODEL_SPECS regardless of catalog availability.
+   */
+  private async resolveModelSpec(model: string): Promise<{
+    contextLength: number;
+    cost: number;
+    quality: number;
+    speed: number;
+  }> {
+    const fallback = MODEL_SPECS[model] ?? {
+      contextLength: 8192,
+      cost: 0,
+      quality: 0.7,
+      speed: 0.7,
+    };
+
+    try {
+      const catalogEntry = await this.modelCatalog.getModel(model);
+      if (catalogEntry) {
+        return {
+          contextLength: catalogEntry.contextLength,
+          cost: catalogEntry.costInputPerM,
+          quality: fallback.quality,
+          speed: fallback.speed,
+        };
+      }
+    } catch {
+      // ModelCatalog is designed to never throw, but cost/latency
+      // estimation must never be what breaks routing regardless.
+    }
+
+    return fallback;
+  }
+
+  /** Real per-model context length — MODEL_SPECS fallback if the catalog has nothing for this model. */
+  async getContextLength(model: string): Promise<number> {
+    const spec = await this.resolveModelSpec(model);
+    return spec.contextLength;
+  }
+
+  private async estimateCost(model: string, tokens: number): Promise<number> {
+    const spec = await this.resolveModelSpec(model);
+    if (spec.cost === 0) return 0;
     return (tokens / 1_000_000) * spec.cost;
   }
 
-  private estimateLatency(model: string, tokens: number): number {
-    const spec = MODEL_SPECS[model];
-    if (!spec) return 5000; // Default 5 seconds
+  private async estimateLatency(
+    model: string,
+    tokens: number,
+  ): Promise<number> {
+    const spec = await this.resolveModelSpec(model);
 
     // Rough estimate: base latency + token processing time
     const baseLatency = 500; // 0.5 seconds base

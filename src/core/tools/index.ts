@@ -6,4 +6,3 @@ export { ToolRegistry, getToolRegistry, resetToolRegistry } from './ToolRegistry
 export type { ToolDefinition, ToolParameter } from './ToolRegistry.js';
 
 export * from './builtin.js';
-export { registerBuiltinTools } from './builtin.js';

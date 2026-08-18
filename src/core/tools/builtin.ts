@@ -16,8 +16,16 @@ import {
 import { join, dirname, basename, extname, relative, resolve } from "path";
 import { execSync, exec } from "child_process";
 import { promisify } from "util";
+import { getToolRegistry } from "./ToolRegistry.js";
 import type { ToolDefinition } from "./ToolRegistry.js";
 import type { ToolResult } from "../../utils/types.js";
+import { createCodeSearchTools } from "./code-search.js";
+import { createFileSystemTools } from "./file-system.js";
+import { spawnSubagentTool } from "./subagent-tool.js";
+import { getLogger } from "../../utils/logger.js";
+import { formatFile } from "../../utils/formatter.js";
+import { getDependencyGraph } from "../../utils/dependency-graph.js";
+import { getMemoryManager } from "../../memory/MemoryManager.js";
 
 const execAsync = promisify(exec);
 
@@ -124,7 +132,6 @@ export const fileWrite: ToolDefinition = {
 
       // Auto-format post write
       try {
-        const { formatFile } = await import("../../utils/formatter.js");
         await formatFile(path);
       } catch {
         // Formatter is optional
@@ -133,7 +140,6 @@ export const fileWrite: ToolDefinition = {
       // Check dependent files via AST dependency graph
       let depMsg = "";
       try {
-        const { getDependencyGraph } = await import("../../utils/dependency-graph.js");
         const dependents = getDependencyGraph().getDependentFiles(path);
         if (dependents.length > 0) {
           depMsg = ` (Dependent files flagged for audit: ${dependents.map((f) => basename(f)).join(", ")})`;
@@ -333,6 +339,131 @@ export const shellExec: ToolDefinition = {
   },
 };
 
+export const shellWhich: ToolDefinition = {
+  name: "shell_which",
+  description: "Find the location of an executable on PATH",
+  parameters: {
+    name: {
+      type: "string",
+      description: "Name of the executable to find",
+      required: true,
+    },
+  },
+  handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+    try {
+      const name = params.name as string;
+      const command =
+        process.platform === "win32" ? `where ${name}` : `which ${name}`;
+      const { stdout } = await execAsync(command);
+      return { success: true, output: stdout.trim() };
+    } catch {
+      return {
+        success: false,
+        output: `Executable not found: ${params.name}`,
+      };
+    }
+  },
+};
+
+export const processList: ToolDefinition = {
+  name: "process_list",
+  description: "List running processes",
+  parameters: {
+    filter: {
+      type: "string",
+      description: "Filter processes by name",
+      required: false,
+    },
+  },
+  handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+    try {
+      const filter = params.filter as string | undefined;
+      const command =
+        process.platform === "win32"
+          ? "tasklist"
+          : filter
+            ? `ps aux | grep ${filter}`
+            : "ps aux";
+
+      const { stdout } = await execAsync(command);
+      return { success: true, output: stdout };
+    } catch (error) {
+      return {
+        success: false,
+        output: `Error listing processes: ${error instanceof Error ? error.message : "Unknown error"}`,
+      };
+    }
+  },
+};
+
+export const processKill: ToolDefinition = {
+  name: "process_kill",
+  description: "Kill a process by PID",
+  parameters: {
+    pid: { type: "number", description: "Process ID to kill", required: true },
+    signal: {
+      type: "string",
+      description: "Signal to send (SIGTERM, SIGKILL, etc.)",
+      required: false,
+      default: "SIGTERM",
+    },
+  },
+  handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+    try {
+      const pid = params.pid as number;
+      const signal = (params.signal as string) ?? "SIGTERM";
+      process.kill(pid, signal as NodeJS.Signals);
+      return { success: true, output: `Sent ${signal} to process ${pid}` };
+    } catch (error) {
+      return {
+        success: false,
+        output: `Error killing process: ${error instanceof Error ? error.message : "Unknown error"}`,
+      };
+    }
+  },
+};
+
+export const logsRead: ToolDefinition = {
+  name: "logs_read",
+  description: "Read log file contents",
+  parameters: {
+    path: { type: "string", description: "Path to log file", required: true },
+    lines: {
+      type: "number",
+      description: "Number of lines to read from end",
+      required: false,
+      default: 100,
+    },
+    filter: {
+      type: "string",
+      description: "Filter lines by pattern",
+      required: false,
+    },
+  },
+  handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
+    try {
+      const path = params.path as string;
+      const lines = (params.lines as number) ?? 100;
+      const filter = params.filter as string | undefined;
+
+      const command =
+        process.platform === "win32"
+          ? `powershell -Command "Get-Content ${path} -Tail ${lines}"`
+          : filter
+            ? `tail -n ${lines} ${path} | grep -E "${filter}"`
+            : `tail -n ${lines} ${path}`;
+
+      const { stdout } = await execAsync(command);
+      return { success: true, output: stdout };
+    } catch (error) {
+      return {
+        success: false,
+        output: `Error reading logs: ${error instanceof Error ? error.message : "Unknown error"}`,
+      };
+    }
+  },
+};
+
 // ============================================================================
 // Git Tools
 // ============================================================================
@@ -519,8 +650,6 @@ export const memoryStore: ToolDefinition = {
   },
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
     try {
-      const { getMemoryManager } =
-        await import("../../memory/MemoryManager.js");
       const memory = getMemoryManager();
 
       const key = params.key as string;
@@ -553,8 +682,6 @@ export const memoryRetrieve: ToolDefinition = {
   },
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
     try {
-      const { getMemoryManager } =
-        await import("../../memory/MemoryManager.js");
       const memory = getMemoryManager();
 
       const query = params.query as string;
@@ -646,10 +773,21 @@ export const testRun: ToolDefinition = {
   },
 };
 
+function hasLintScript(cwd: string): boolean {
+  const pkgPath = join(cwd, "package.json");
+  if (!existsSync(pkgPath)) return false;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+    return typeof pkg?.scripts?.lint === "string";
+  } catch {
+    return false;
+  }
+}
+
 export const workspaceVerify: ToolDefinition = {
   name: "workspace_verify",
   description:
-    "Verify workspace integrity across ALL files: runs TypeScript type-checking (tsc -p .) and unit tests to ensure no broken dependencies or imports exist across the codebase.",
+    "Verify workspace integrity across ALL files: runs TypeScript type-checking (tsc -p .) and unit tests to ensure no broken dependencies or imports exist across the codebase. Also runs lint when risk is high.",
   parameters: {
     cwd: {
       type: "string",
@@ -662,22 +800,45 @@ export const workspaceVerify: ToolDefinition = {
       required: false,
       default: true,
     },
+    risk: {
+      type: "string",
+      description:
+        "Task risk level ('low'|'medium'|'high') — 'high' also runs lint if the target project has a lint script.",
+      required: false,
+    },
+    runLint: {
+      type: "boolean",
+      description: "Force the lint check regardless of risk level",
+      required: false,
+    },
   },
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
-    const cwd = (params.cwd as string) ?? (params.path as string) ?? process.cwd();
+    const cwd =
+      (params.cwd as string) ?? (params.path as string) ?? process.cwd();
     const runTests = (params.runTests as boolean) ?? true;
+    const risk = params.risk as string | undefined;
+    const shouldLint =
+      ((risk === "high" || params.runLint === true) && hasLintScript(cwd));
     const logs: string[] = [];
-    let overallSuccess = true;
+    // Tracked per-check (not one shared flag) so a failure in one check
+    // can't misreport an unrelated check's status field.
+    let compilationStatus: "PASSED (0 errors)" | "FAILED" | "SKIPPED (no tsconfig.json)" =
+      "SKIPPED (no tsconfig.json)";
+    let testsStatus: "PASSED" | "FAILED" | "SKIPPED" = "SKIPPED";
+    let lintStatus: "PASSED" | "FAILED" | "SKIPPED" = "SKIPPED";
 
     // 1. TypeScript compilation check
     if (existsSync(join(cwd, "tsconfig.json"))) {
       try {
         await execAsync("npx tsc -p . --noEmit", { cwd, timeout: 60000 });
         logs.push("✔ TypeScript compilation check: PASSED (0 errors)");
+        compilationStatus = "PASSED (0 errors)";
       } catch (error) {
-        overallSuccess = false;
+        compilationStatus = "FAILED";
         const err = error as { stdout?: string; stderr?: string };
-        logs.push(`✖ TypeScript compilation check: FAILED\n${err.stdout || err.stderr || String(error)}`);
+        logs.push(
+          `✖ TypeScript compilation check: FAILED\n${err.stdout || err.stderr || String(error)}`,
+        );
       }
     }
 
@@ -686,26 +847,44 @@ export const workspaceVerify: ToolDefinition = {
       try {
         await execAsync("npm test", { cwd, timeout: 120000 });
         logs.push("✔ Test suite check: PASSED");
+        testsStatus = "PASSED";
       } catch (error) {
-        overallSuccess = false;
+        testsStatus = "FAILED";
         const err = error as { stdout?: string; stderr?: string };
-        logs.push(`✖ Test suite check: FAILED\n${err.stdout || err.stderr || String(error)}`);
+        logs.push(
+          `✖ Test suite check: FAILED\n${err.stdout || err.stderr || String(error)}`,
+        );
       }
     }
+
+    // 3. Lint check — only for high-risk tasks (or an explicit override),
+    // and only if the target project actually defines a lint script.
+    if (shouldLint) {
+      try {
+        await execAsync("npm run lint", { cwd, timeout: 60000 });
+        logs.push("✔ Lint check: PASSED");
+        lintStatus = "PASSED";
+      } catch (error) {
+        lintStatus = "FAILED";
+        const err = error as { stdout?: string; stderr?: string };
+        logs.push(
+          `✖ Lint check: FAILED\n${err.stdout || err.stderr || String(error)}`,
+        );
+      }
+    }
+
+    const overallSuccess =
+      compilationStatus !== "FAILED" &&
+      testsStatus !== "FAILED" &&
+      lintStatus !== "FAILED";
 
     const resultPayload = {
       status: overallSuccess ? "success" : "failed",
       tool: "workspace_verify",
-      compilation: existsSync(join(cwd, "tsconfig.json"))
-        ? overallSuccess
-          ? "PASSED (0 errors)"
-          : "FAILED"
-        : "SKIPPED (no tsconfig.json)",
-      tests: runTests && existsSync(join(cwd, "package.json"))
-        ? overallSuccess
-          ? "PASSED"
-          : "FAILED"
-        : "SKIPPED",
+      compilation: compilationStatus,
+      tests: testsStatus,
+      lint: lintStatus,
+      risk: risk ?? "unspecified",
       details: logs,
     };
 
@@ -735,6 +914,10 @@ export function registerBuiltinTools(
 
   // Shell tools
   registry.register(shellExec);
+  registry.register(shellWhich);
+  registry.register(processList);
+  registry.register(processKill);
+  registry.register(logsRead);
 
   // Git tools
   registry.register(gitStatus);
@@ -750,4 +933,49 @@ export function registerBuiltinTools(
   // Test & Verification tools
   registry.register(testRun);
   registry.register(workspaceVerify);
+
+  // Code search tools (search_files, search_content, grep, find_usages,
+  // analyze_imports, analyze_exports, count_lines) — previously defined but
+  // never registered, so the only way to search code was an LLM-improvised
+  // shell_exec call.
+  for (const tool of createCodeSearchTools()) {
+    registry.register(tool);
+  }
+
+  // file-system.ts duplicates file_read/file_write/file_delete/file_list
+  // (already registered above from this file) — only register the tools it
+  // defines that don't collide. `directory_create` in particular already has
+  // a dedicated permission-system rule (permission-system.ts) despite never
+  // having been registered anywhere.
+  const FS_EXTRAS = new Set([
+    "file_exists",
+    "file_copy",
+    "file_move",
+    "directory_create",
+  ]);
+  for (const tool of createFileSystemTools()) {
+    if (FS_EXTRAS.has(tool.name)) {
+      registry.register(tool);
+    }
+  }
+
+  // Sub-agent delegation (see core/orchestrator/ParallelOrchestrator.ts).
+  // Only granted to `code`/`plan` modes via TOOL_SETS — see tool-sets.ts.
+  registry.register(spawnSubagentTool);
+}
+
+let builtinToolsRegistered = false;
+
+/**
+ * Idempotent convenience wrapper around registerBuiltinTools() for the
+ * common case of registering onto the process-wide default registry once
+ * per process. Tests that need a fresh/custom registry should call
+ * registerBuiltinTools(registry) directly instead.
+ */
+export function ensureBuiltinToolsRegistered(): void {
+  if (builtinToolsRegistered) return;
+  builtinToolsRegistered = true;
+
+  registerBuiltinTools(getToolRegistry());
+  getLogger().info("Built-in tools registered");
 }

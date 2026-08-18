@@ -8,8 +8,10 @@ import chalk from "chalk";
 import { getLogger } from "../../utils/logger.js";
 import { getSkillRegistry } from "../../skills/SkillRegistry.js";
 import { getHookManager } from "../../hooks/HookManager.js";
+import { registerBuiltinHooks } from "../../hooks/registerBuiltinHooks.js";
 import { getAgentSpawner } from "../../core/orchestrator/AgentSpawner.js";
 import { getConfigManager } from "../../utils/config.js";
+import { getMemoryManager } from "../../memory/MemoryManager.js";
 import { getTaskManager } from "../../utils/task-manager.js";
 import {
   getSystemAnalyzer,
@@ -74,21 +76,51 @@ export class InteractiveMode {
       chalk.bold.cyan(`
 ╭────────────────────────────────────────────────────────────╮
 │                                                            │
-│  `) + chalk.bold.white(`⚡  CodingAgent v2.0`) + chalk.bold.cyan(`                                      │
+│  `) +
+        chalk.bold.white(`⚡  CodingAgent v2.0`) +
+        chalk.bold.cyan(`                                      │
 │                                                            │
-│  `) + chalk.gray(`Universal AI Engineer with intuitive mode switching`) + chalk.bold.cyan(`       │
+│  `) +
+        chalk.gray(`Universal AI Engineer with intuitive mode switching`) +
+        chalk.bold.cyan(`       │
 │                                                            │
 ├────────────────────────────────────────────────────────────┤
 │                                                            │
-│  `) + chalk.bold(`Core Commands:`) + chalk.bold.cyan(`                                           │
-│  `) + chalk.gray(`• /auto     `) + chalk.white(`AI auto-detects best mode (default)`) + chalk.bold.cyan(`        │
-│  `) + chalk.gray(`• /run      `) + chalk.white(`General coding tasks`) + chalk.bold.cyan(`                       │
-│  `) + chalk.gray(`• /plan     `) + chalk.white(`Architecture & roadmap design`) + chalk.bold.cyan(`              │
-│  `) + chalk.gray(`• /debug    `) + chalk.white(`Debug and fix issues`) + chalk.bold.cyan(`                       │
-│  `) + chalk.gray(`• /test     `) + chalk.white(`Generate or run tests`) + chalk.bold.cyan(`                      │
+│  `) +
+        chalk.bold(`Core Commands:`) +
+        chalk.bold.cyan(`                                           │
+│  `) +
+        chalk.gray(`• /auto     `) +
+        chalk.white(`AI auto-detects best mode (default)`) +
+        chalk.bold.cyan(`        │
+│  `) +
+        chalk.gray(`• /run      `) +
+        chalk.white(`General coding tasks`) +
+        chalk.bold.cyan(`                       │
+│  `) +
+        chalk.gray(`• /plan     `) +
+        chalk.white(`Architecture & roadmap design`) +
+        chalk.bold.cyan(`              │
+│  `) +
+        chalk.gray(`• /debug    `) +
+        chalk.white(`Debug and fix issues`) +
+        chalk.bold.cyan(`                       │
+│  `) +
+        chalk.gray(`• /test     `) +
+        chalk.white(`Generate or run tests`) +
+        chalk.bold.cyan(`                      │
 │                                                            │
-│  `) + chalk.bold(`System: `) + colorFn(systemCaps.status.toUpperCase().padEnd(9)) + chalk.gray(` | CPU: ${systemCaps.cpuCount} | RAM: ${systemCaps.memoryUsagePercent}%`) + chalk.bold.cyan(`             │
-│  `) + chalk.bold(`Model:  `) + chalk.magenta(modelInfo.padEnd(20)) + chalk.bold.cyan(`                           │
+│  `) +
+        chalk.bold(`System: `) +
+        colorFn(systemCaps.status.toUpperCase().padEnd(9)) +
+        chalk.gray(
+          ` | CPU: ${systemCaps.cpuCount} | RAM: ${systemCaps.memoryUsagePercent}%`,
+        ) +
+        chalk.bold.cyan(`             │
+│  `) +
+        chalk.bold(`Model:  `) +
+        chalk.magenta(modelInfo.padEnd(20)) +
+        chalk.bold.cyan(`                           │
 │                                                            │
 ╰────────────────────────────────────────────────────────────╯
     `),
@@ -118,6 +150,7 @@ export class InteractiveMode {
 
     const hookManager = getHookManager();
     hookManager.enable();
+    registerBuiltinHooks();
 
     const configManager = getConfigManager();
     configManager.load();
@@ -191,6 +224,18 @@ export class InteractiveMode {
 
       case "config":
         await this.handleConfigCommand(args);
+        break;
+
+      case "remember":
+        await this.handleRemember(args);
+        break;
+
+      case "forget":
+        await this.handleForget(args);
+        break;
+
+      case "memory":
+        await this.showMemory();
         break;
 
       case "system":
@@ -337,6 +382,48 @@ export class InteractiveMode {
     console.log("");
   }
 
+  private async handleRemember(args: string[]): Promise<void> {
+    const fact = args.join(" ");
+    if (!fact) {
+      console.log(chalk.yellow("Usage: /remember <fact>"));
+      return;
+    }
+    await getMemoryManager().remember(fact);
+    console.log(chalk.green(`Remembered: ${fact}`));
+  }
+
+  private async handleForget(args: string[]): Promise<void> {
+    const fact = args.join(" ");
+    if (!fact) {
+      console.log(chalk.yellow("Usage: /forget <fact>"));
+      return;
+    }
+    const removed = await getMemoryManager().forget(fact);
+    console.log(
+      removed
+        ? chalk.green(`Forgot: ${fact}`)
+        : chalk.yellow(`No matching memory found for: ${fact}`),
+    );
+  }
+
+  private async showMemory(): Promise<void> {
+    const memory = getMemoryManager();
+
+    console.log(chalk.bold.cyan("\nUser preferences:\n"));
+    const preferences = await memory.query({ scope: "user" });
+    if (preferences.length === 0) {
+      console.log(chalk.gray("  (none remembered yet — try /remember <fact>)"));
+    } else {
+      for (const { entry } of preferences) {
+        console.log(chalk.white(`  - ${entry.content}`));
+      }
+    }
+
+    console.log(chalk.bold.cyan("\nProject knowledge:\n"));
+    const projectKnowledge = await memory.exportProjectKnowledge();
+    console.log(chalk.gray(projectKnowledge));
+  }
+
   private configGet(key: string): void {
     const configManager = getConfigManager();
     const value = configManager.getConfigValue(key);
@@ -395,11 +482,15 @@ export class InteractiveMode {
     const matchedSkill = skillRegistry.findByTrigger(input);
 
     if (matchedSkill) {
-      console.log(chalk.blue(`Executing skill: ${matchedSkill.name}`));
+      console.log(chalk.blue(`Matched skill: ${matchedSkill.name}`));
       console.log(chalk.gray(matchedSkill.description));
       console.log("");
     }
 
+    // Skills are prompt injections, not autonomous executors: matched
+    // instructions are appended to the agent's system prompt (see
+    // UniversalAgent.execute()) rather than run directly here — this is
+    // what previously made skill matching a no-op beyond a console message.
     const task: Task = {
       id: taskContext.id,
       description: input,
@@ -407,7 +498,17 @@ export class InteractiveMode {
       status: "pending",
       createdAt: new Date(),
       updatedAt: new Date(),
-      metadata: taskContext.metadata,
+      metadata: {
+        ...taskContext.metadata,
+        ...(matchedSkill
+          ? {
+              skillName: matchedSkill.name,
+              skillInstructions: matchedSkill.instructions
+                .map((instruction, i) => `${i + 1}. ${instruction}`)
+                .join("\n"),
+            }
+          : {}),
+      },
     };
 
     const agentType =
@@ -559,24 +660,93 @@ export class InteractiveMode {
     console.log(chalk.cyan("\n╭─ ") + chalk.bold.white("Available Commands"));
     console.log(chalk.cyan("│"));
     console.log(chalk.cyan("├─ ") + chalk.bold("Modes"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/auto         ") + chalk.white("Auto-detect (default)"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/run, /r      ") + chalk.white("General Coding"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/plan, /p     ") + chalk.white("Planning & Architecture"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/debug, /d    ") + chalk.white("Debugging"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/test, /t     ") + chalk.white("Testing"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/review       ") + chalk.white("Code Review"));
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/auto         ") +
+        chalk.white("Auto-detect (default)"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/run, /r      ") +
+        chalk.white("General Coding"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/plan, /p     ") +
+        chalk.white("Planning & Architecture"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/debug, /d    ") +
+        chalk.white("Debugging"),
+    );
+    console.log(
+      chalk.cyan("│  ") + chalk.gray("/test, /t     ") + chalk.white("Testing"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/review       ") +
+        chalk.white("Code Review"),
+    );
     console.log(chalk.cyan("│"));
     console.log(chalk.cyan("├─ ") + chalk.bold("Configuration"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/config             ") + chalk.white("Show current config"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/config set <k> <v> ") + chalk.white("Update config"));
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/config             ") +
+        chalk.white("Show current config"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/config set <k> <v> ") +
+        chalk.white("Update config"),
+    );
+    console.log(chalk.cyan("│"));
+    console.log(chalk.cyan("├─ ") + chalk.bold("Memory"));
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/remember <fact>    ") +
+        chalk.white("Store an explicit preference/fact"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/forget <fact>      ") +
+        chalk.white("Remove a remembered fact"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/memory             ") +
+        chalk.white("Show preferences & project knowledge"),
+    );
     console.log(chalk.cyan("│"));
     console.log(chalk.cyan("├─ ") + chalk.bold("System"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/sys          ") + chalk.white("Show system diagnostics"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/skills, /s   ") + chalk.white("List loaded skills"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/history      ") + chalk.white("Show prompt history"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/clear        ") + chalk.white("Clear the screen"));
-    console.log(chalk.cyan("│  ") + chalk.gray("/exit, /q     ") + chalk.white("Exit interactive mode"));
-    console.log(chalk.cyan("╰─────────────────────────────────────────────────\n"));
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/sys          ") +
+        chalk.white("Show system diagnostics"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/skills, /s   ") +
+        chalk.white("List loaded skills"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/history      ") +
+        chalk.white("Show prompt history"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/clear        ") +
+        chalk.white("Clear the screen"),
+    );
+    console.log(
+      chalk.cyan("│  ") +
+        chalk.gray("/exit, /q     ") +
+        chalk.white("Exit interactive mode"),
+    );
+    console.log(
+      chalk.cyan("╰─────────────────────────────────────────────────\n"),
+    );
   }
 
   private async showSkills(): Promise<void> {
@@ -610,12 +780,38 @@ export class InteractiveMode {
 
     console.log(chalk.cyan("\n╭─ ") + chalk.bold.white("System Diagnostics"));
     console.log(chalk.cyan("│"));
-    console.log(chalk.cyan("├─ ") + chalk.bold("Status:   ") + statusColor[caps.status](caps.status.toUpperCase()));
-    console.log(chalk.cyan("├─ ") + chalk.bold("CPU:      ") + chalk.gray(`${caps.cpuCount} cores (${caps.cpuModel})`));
-    console.log(chalk.cyan("├─ ") + chalk.bold("Memory:   ") + chalk.gray(`${caps.freeMemoryGB}GB free / ${caps.totalMemoryGB}GB total (${caps.memoryUsagePercent}% used)`));
-    console.log(chalk.cyan("├─ ") + chalk.bold("Load:     ") + chalk.gray(`${caps.loadAverage.join(", ")}`));
-    console.log(chalk.cyan("├─ ") + chalk.bold("Limits:   ") + chalk.gray(`${caps.recommendedMaxTokens} max tokens / ${caps.recommendedMaxAgents} max agents`));
-    console.log(chalk.cyan("╰─────────────────────────────────────────────────\n"));
+    console.log(
+      chalk.cyan("├─ ") +
+        chalk.bold("Status:   ") +
+        statusColor[caps.status](caps.status.toUpperCase()),
+    );
+    console.log(
+      chalk.cyan("├─ ") +
+        chalk.bold("CPU:      ") +
+        chalk.gray(`${caps.cpuCount} cores (${caps.cpuModel})`),
+    );
+    console.log(
+      chalk.cyan("├─ ") +
+        chalk.bold("Memory:   ") +
+        chalk.gray(
+          `${caps.freeMemoryGB}GB free / ${caps.totalMemoryGB}GB total (${caps.memoryUsagePercent}% used)`,
+        ),
+    );
+    console.log(
+      chalk.cyan("├─ ") +
+        chalk.bold("Load:     ") +
+        chalk.gray(`${caps.loadAverage.join(", ")}`),
+    );
+    console.log(
+      chalk.cyan("├─ ") +
+        chalk.bold("Limits:   ") +
+        chalk.gray(
+          `${caps.recommendedMaxTokens} max tokens / ${caps.recommendedMaxAgents} max agents`,
+        ),
+    );
+    console.log(
+      chalk.cyan("╰─────────────────────────────────────────────────\n"),
+    );
   }
 
   private showTasks(): void {

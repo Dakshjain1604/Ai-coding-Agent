@@ -19,6 +19,8 @@ export interface Task {
   updatedAt: Date;
   metadata?: Record<string, unknown>;
   subtasks?: Task[];
+  /** Scored independently from complexity — see TaskAnalyzer.analyzeRiskFactors(). */
+  risk?: "low" | "medium" | "high";
 }
 
 export interface TaskResult {
@@ -67,42 +69,6 @@ export interface SpawnStrategy {
   mode: "single" | "pipeline" | "parallel";
   agents: AgentType[];
   maxParallel: number;
-}
-
-// ============================================================================
-// Memory Types
-// ============================================================================
-
-export interface MemoryEntry {
-  id: string;
-  type: "pattern" | "decision" | "preference" | "conversation" | "execution";
-  content: string;
-  metadata: Record<string, unknown>;
-  embedding?: number[];
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-export interface ConversationRecord {
-  id: string;
-  timestamp: Date;
-  summary: string;
-  embedding?: number[];
-  turns: ConversationTurn[];
-}
-
-export interface ConversationTurn {
-  role: "user" | "assistant" | "system";
-  content: string;
-  timestamp: Date;
-}
-
-export interface ContextWindow {
-  id: string;
-  maxSize: number;
-  currentSize: number;
-  entries: MemoryEntry[];
-  summary?: string;
 }
 
 // ============================================================================
@@ -238,6 +204,7 @@ export interface AppConfig {
     complexityThreshold: number;
     maxPaidApiCalls: number;
     outputDir: string;
+    streaming: boolean;
   };
   [key: string]: unknown;
 }

@@ -25,8 +25,12 @@ export const preToolUseHook: Hook = {
       if (toolName === "shell_exec") {
         const cmd = params.command as string;
         if (cmd?.includes("rm -rf") || cmd?.includes("del /")) {
+          // `skip: true` is the only field HookManager treats as an
+          // unconditional block (success:false alone is only enforced if
+          // the hook's config has failOnError set, which this hook doesn't).
           return {
             success: false,
+            skip: true,
             error: `Dangerous command blocked: ${cmd}`,
           };
         }

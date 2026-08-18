@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { getLogger } from "../../utils/logger.js";
 import { executeTask } from "../../core/orchestrator/AgentSpawner.js";
 import { validateProviders } from "../../utils/healthcheck.js";
+import { getPermissionSystem } from "../../utils/permission-system.js";
 import type { Task } from "../../utils/types.js";
 
 export default class TestCommand extends Command {
@@ -46,7 +47,9 @@ export default class TestCommand extends Command {
   async run(): Promise<void> {
     const { args, flags } = await this.parse(TestCommand);
 
-    const action = flags.generate ? "Generate" : "Run";
+    if (flags["no-confirm"]) {
+      getPermissionSystem().allowAll();
+    }
 
     // Validate providers are available
     await validateProviders();
@@ -77,7 +80,6 @@ export default class TestCommand extends Command {
         testType: flags.type,
         generate: flags.generate,
         coverage: flags.coverage,
-        noConfirm: flags["no-confirm"],
       },
     };
 

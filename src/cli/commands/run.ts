@@ -9,6 +9,7 @@ import { getLogger } from "../../utils/logger.js";
 import { getTaskAnalyzer } from "../../core/orchestrator/TaskAnalyzer.js";
 import { executeTask } from "../../core/orchestrator/AgentSpawner.js";
 import { validateProviders } from "../../utils/healthcheck.js";
+import { getPermissionSystem } from "../../utils/permission-system.js";
 import type { Task, TaskComplexity } from "../../utils/types.js";
 
 export default class RunCommand extends Command {
@@ -46,7 +47,6 @@ export default class RunCommand extends Command {
     const { args, flags } = await this.parse(RunCommand);
 
     if (flags["no-confirm"]) {
-      const { getPermissionSystem } = await import("../../utils/permission-system.js");
       getPermissionSystem().allowAll();
     }
 

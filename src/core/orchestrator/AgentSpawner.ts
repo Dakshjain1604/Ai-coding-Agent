@@ -9,13 +9,13 @@ import type {
   AgentType,
   AgentConfig,
   AgentState,
-  SpawnStrategy,
 } from "../../utils/types.js";
 import type { BaseAgent } from "../agents/BaseAgent.js";
 import { UniversalAgent } from "../agents/UniversalAgent.js";
 import { getConfigManager } from "../../utils/config.js";
 import { getSystemAnalyzer } from "../../utils/system-analyzer.js";
 import { getTaskManager } from "../../utils/task-manager.js";
+import { getTaskAnalyzer } from "./TaskAnalyzer.js";
 
 export interface SpawnedAgent {
   id: string;
@@ -118,44 +118,6 @@ export class AgentSpawner {
   }
 
   /**
-   * Spawn multiple agents based on strategy
-   */
-  async spawnWithStrategy(
-    strategy: SpawnStrategy,
-    task: Task,
-    options?: SpawnOptions,
-  ): Promise<SpawnedAgent[]> {
-    const results: SpawnedAgent[] = [];
-
-    switch (strategy.mode) {
-      case "single":
-        // Single agent
-        results.push(await this.spawn(strategy.agents[0], task));
-        break;
-
-      case "pipeline":
-        // Sequential execution
-        for (const agentType of strategy.agents) {
-          const spawned = await this.spawn(agentType, task);
-          results.push(spawned);
-        }
-        break;
-
-      case "parallel": {
-        // Parallel execution with limit
-        const agentsToSpawn = strategy.agents.slice(0, strategy.maxParallel);
-        const spawnPromises = agentsToSpawn.map((type) =>
-          this.spawn(type, task),
-        );
-        results.push(...(await Promise.all(spawnPromises)));
-        break;
-      }
-    }
-
-    return results;
-  }
-
-  /**
    * Execute a spawned agent
    */
   async execute(
@@ -202,62 +164,6 @@ export class AgentSpawner {
       this.logger.agentError(spawned.type, spawned.task.id, err);
       return result;
     }
-  }
-
-  /**
-   * Execute multiple spawned agents in parallel
-   */
-  async executeParallel(
-    spawnedIds: string[],
-    options?: SpawnOptions,
-  ): Promise<Map<string, TaskResult>> {
-    const results = new Map<string, TaskResult>();
-
-    // Execute with concurrency limit
-    const executing: Promise<void>[] = [];
-    const queue = [...spawnedIds];
-
-    const processNext = async () => {
-      while (queue.length > 0) {
-        const id = queue.shift();
-        if (!id) break;
-
-        const result = await this.execute(id, options);
-        results.set(id, result);
-      }
-    };
-
-    // Start parallel executions
-    const concurrency = Math.min(this.maxParallel, spawnedIds.length);
-    for (let i = 0; i < concurrency; i++) {
-      executing.push(processNext());
-    }
-
-    await Promise.all(executing);
-    return results;
-  }
-
-  /**
-   * Execute spawned agents in a pipeline (sequential)
-   */
-  async executePipeline(
-    spawnedIds: string[],
-    options?: SpawnOptions,
-  ): Promise<Map<string, TaskResult>> {
-    const results = new Map<string, TaskResult>();
-
-    for (const id of spawnedIds) {
-      const result = await this.execute(id, options);
-      results.set(id, result);
-
-      // Stop pipeline on failure unless continueOnError
-      if (!result.success) {
-        this.logger.warn(`Pipeline stopped due to failure: ${id}`);
-        break;
-      }
-    }
-
-    return results;
   }
 
   /**
@@ -410,9 +316,14 @@ export async function executeTask(task: Task): Promise<TaskResult> {
   const spawner = getAgentSpawner();
 
   // Analyze task to determine agent type
-  const { getTaskAnalyzer } = await import("./TaskAnalyzer.js");
   const analyzer = getTaskAnalyzer();
   const analysis = analyzer.analyze(task);
+
+  // Risk is independent of the agent-routing complexity/strategy above —
+  // feeds the security wiring (risk-aware permission prompts, risk-aware
+  // lint step) in BaseAgent/UniversalAgent.
+  task.risk = analysis.risk;
+  task.metadata = { ...task.metadata, riskFactors: analysis.riskFactors };
 
   // Determine agent type based on command in metadata or analysis
   let agentType: AgentType = "code";

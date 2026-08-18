@@ -116,34 +116,6 @@ export const CompletionOptionsSchema = z.object({
 });
 
 // ============================================================================
-// Memory Validation
-// ============================================================================
-
-export const MemoryEntrySchema = z.object({
-  id: z.string(),
-  type: z.enum([
-    "pattern",
-    "decision",
-    "preference",
-    "conversation",
-    "execution",
-  ]),
-  content: z.string(),
-  metadata: z.record(z.unknown()),
-  embedding: z.array(z.number()).optional(),
-  createdAt: z.date(),
-  updatedAt: z.date(),
-});
-
-export const ContextWindowSchema = z.object({
-  id: z.string(),
-  maxSize: z.number().int().positive(),
-  currentSize: z.number().int().nonnegative(),
-  entries: z.array(MemoryEntrySchema),
-  summary: z.string().optional(),
-});
-
-// ============================================================================
 // Skill Validation
 // ============================================================================
 

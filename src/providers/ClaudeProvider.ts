@@ -111,8 +111,12 @@ export class ClaudeProvider extends BaseProvider {
       const response = await this.client.messages.create({
         model,
         max_tokens: maxTokens,
-        system: systemMessage?.content as string | undefined,
-        messages: this.convertMessages(otherMessages),
+        system: this.buildSystemParam(
+          systemMessage?.content as string | undefined,
+        ),
+        messages: this.convertMessages(otherMessages, {
+          cacheLastMessage: true,
+        }),
         temperature: options?.temperature,
         top_p: options?.topP,
         stop_sequences: options?.stopSequences,
@@ -179,8 +183,12 @@ export class ClaudeProvider extends BaseProvider {
     const stream = this.client.messages.stream({
       model,
       max_tokens: maxTokens,
-      system: systemMessage?.content as string | undefined,
-      messages: this.convertMessages(otherMessages),
+      system: this.buildSystemParam(
+        systemMessage?.content as string | undefined,
+      ),
+      messages: this.convertMessages(otherMessages, {
+        cacheLastMessage: true,
+      }),
       temperature: options?.temperature,
       top_p: options?.topP,
       stop_sequences: options?.stopSequences,
@@ -256,21 +264,60 @@ export class ClaudeProvider extends BaseProvider {
     );
   }
 
-  private convertMessages(
-    messages: ChatMessage[],
-  ): Anthropic.Messages.MessageParam[] {
-    return messages.map((msg) => ({
-      role: msg.role as "user" | "assistant",
-      content: this.convertContent(msg.content),
-    })) as Anthropic.Messages.MessageParam[];
+  /**
+   * Marks the system prompt as cacheable (Anthropic prompt caching). Below
+   * Anthropic's minimum cacheable length the marker is silently ignored,
+   * so it's safe to always attach it rather than length-checking first.
+   * Context Epoch (see core/agents/ContextEpoch.ts) is what actually makes
+   * this pay off — it keeps the system prompt byte-for-byte stable across
+   * a task's turns instead of rebuilding it each call.
+   */
+  private buildSystemParam(
+    systemText?: string,
+  ): string | Array<{ type: "text"; text: string; cache_control: { type: "ephemeral" } }> | undefined {
+    if (!systemText) return undefined;
+    return [
+      { type: "text", text: systemText, cache_control: { type: "ephemeral" } },
+    ];
   }
 
-  private convertContent(content: string | ContentBlock[]): string | unknown {
+  private convertMessages(
+    messages: ChatMessage[],
+    options?: { cacheLastMessage?: boolean },
+  ): Anthropic.Messages.MessageParam[] {
+    return messages.map((msg, index) => {
+      const shouldMarkCacheable =
+        options?.cacheLastMessage === true && index === messages.length - 1;
+      return {
+        role: msg.role as "user" | "assistant",
+        content: this.convertContent(msg.content, shouldMarkCacheable),
+      };
+    }) as Anthropic.Messages.MessageParam[];
+  }
+
+  /**
+   * `markCacheable` marks the LAST content block with a cache breakpoint —
+   * meaning "everything up to and including this message is reusable from
+   * cache on the next call." Since history only ever grows by appending,
+   * the next turn's identical prefix (this exact message set) gets served
+   * from cache and only the newly-appended content is processed fresh.
+   */
+  private convertContent(
+    content: string | ContentBlock[],
+    markCacheable?: boolean,
+  ): string | unknown {
     if (typeof content === "string") {
-      return content;
+      if (!markCacheable) return content;
+      return [
+        {
+          type: "text" as const,
+          text: content,
+          cache_control: { type: "ephemeral" as const },
+        },
+      ];
     }
 
-    return content.map((block) => {
+    const blocks = content.map((block) => {
       if (block.type === "text") {
         return { type: "text" as const, text: block.text ?? "" };
       }
@@ -286,5 +333,12 @@ export class ClaudeProvider extends BaseProvider {
       }
       return { type: "text" as const, text: "" };
     });
+
+    if (markCacheable && blocks.length > 0) {
+      const last = blocks[blocks.length - 1] as Record<string, unknown>;
+      last.cache_control = { type: "ephemeral" };
+    }
+
+    return blocks;
   }
 }

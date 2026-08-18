@@ -5,7 +5,7 @@
 import { Command, Args } from "@oclif/core";
 import chalk from "chalk";
 import { getLogger } from "../../utils/logger.js";
-import { getConfig, setConfig, listConfig } from "../../utils/config.js";
+import { getConfig, setConfig, listConfig, maskApiKey } from "../../utils/config.js";
 
 export default class ConfigCommand extends Command {
   static description = "Manage CodingAgent configuration";
@@ -55,7 +55,11 @@ export default class ConfigCommand extends Command {
     if (value === undefined) {
       this.log(chalk.yellow(`Configuration key not found: ${key}`));
     } else {
-      this.log(chalk.white(`${key}: ${JSON.stringify(value, null, 2)}`));
+      const display =
+        key.endsWith("apiKey") && typeof value === "string"
+          ? maskApiKey(value)
+          : value;
+      this.log(chalk.white(`${key}: ${JSON.stringify(display, null, 2)}`));
     }
   }
 
@@ -80,6 +84,9 @@ export default class ConfigCommand extends Command {
     this.log(chalk.bold.cyan("\n⚙️  CodingAgent Configuration\n"));
 
     this.log(chalk.bold.white("\nProviders:"));
+    // apiKey is intentionally never printed here, even masked — this loop
+    // must stay scoped to non-secret fields, not "helpfully" grow to cover
+    // it later.
     for (const [name, provider] of Object.entries(config.providers || {})) {
       this.log(chalk.gray(`  ${name}:`));
       this.log(chalk.gray(`    enabled: ${provider.enabled}`));
