@@ -5,7 +5,36 @@
 import { Command, Args } from "@oclif/core";
 import chalk from "chalk";
 import { getLogger } from "../../utils/logger.js";
-import { getConfig, setConfig, listConfig, maskApiKey } from "../../utils/config.js";
+import {
+  getConfig,
+  setConfig,
+  listConfig,
+  maskApiKey,
+  getConfigManager,
+} from "../../utils/config.js";
+import type { ProviderConfig } from "../../utils/types.js";
+
+/**
+ * config.providers is an array (ProviderConfig[]), not a name-keyed
+ * object — `Object.entries(providers)` used to yield ["0", provider],
+ * ["1", provider]... so `config list` printed numeric array indices
+ * ("0:", "1:") instead of the actual provider name ("claude:", "groq:").
+ * Confirmed live before fixing. apiKey is intentionally never included
+ * here, even masked — must stay scoped to non-secret fields.
+ */
+export function formatProviderLines(providers: ProviderConfig[] | undefined): string[] {
+  const lines: string[] = [];
+  for (const provider of providers ?? []) {
+    lines.push(`  ${provider.type}:`);
+    lines.push(`    enabled: ${provider.enabled}`);
+    lines.push(
+      `    models: ${Object.entries(provider.models || {})
+        .map(([k, v]) => `${k}=${v}`)
+        .join(", ")}`,
+    );
+  }
+  return lines;
+}
 
 export default class ConfigCommand extends Command {
   static description = "Manage CodingAgent configuration";
@@ -84,19 +113,8 @@ export default class ConfigCommand extends Command {
     this.log(chalk.bold.cyan("\n⚙️  CodingAgent Configuration\n"));
 
     this.log(chalk.bold.white("\nProviders:"));
-    // apiKey is intentionally never printed here, even masked — this loop
-    // must stay scoped to non-secret fields, not "helpfully" grow to cover
-    // it later.
-    for (const [name, provider] of Object.entries(config.providers || {})) {
-      this.log(chalk.gray(`  ${name}:`));
-      this.log(chalk.gray(`    enabled: ${provider.enabled}`));
-      this.log(
-        chalk.gray(
-          `    models: ${Object.entries(provider.models || {})
-            .map(([k, v]) => `${k}=${v}`)
-            .join(", ")}`,
-        ),
-      );
+    for (const line of formatProviderLines(config.providers)) {
+      this.log(chalk.gray(line));
     }
 
     this.log(chalk.bold.white("\nDefaults:"));
@@ -115,7 +133,17 @@ export default class ConfigCommand extends Command {
   private async initializeConfig(): Promise<void> {
     this.log(chalk.bold.cyan("\n📝 Initializing CodingAgent Configuration\n"));
 
-    // Create default config files
+    // Used to just print a success message without ever writing a file —
+    // `// Create default config files` documented the intent as a
+    // comment, but nothing after it actually did so, despite
+    // ConfigManager.save() already existing and doing exactly this.
+    // load() populates defaults merged with any existing project config
+    // (never destructive — existing values always win the merge), then
+    // save() writes it to coding-agent.json.
+    const manager = getConfigManager();
+    manager.load();
+    manager.save();
+
     this.log(chalk.green("Configuration initialized successfully!"));
     this.log(
       chalk.gray("\nRun `coding-agent config list` to see current settings."),
