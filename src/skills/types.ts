@@ -25,19 +25,6 @@ export interface SkillMatch {
   matchedTrigger: string;
 }
 
-export interface SkillExecutionContext {
-  input: string;
-  context: Record<string, unknown>;
-  tools: Map<string, unknown>;
-}
-
-export interface SkillResult {
-  success: boolean;
-  output: string;
-  artifacts?: string[];
-  error?: string;
-}
-
 export type SkillLoaderMode = "markdown" | "yaml";
 
 export interface SkillDefinition {

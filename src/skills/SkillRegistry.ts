@@ -7,12 +7,7 @@ import { existsSync, mkdirSync } from "fs";
 import { join } from "path";
 import { getLogger } from "../utils/logger.js";
 import { getSkillLoader, SkillLoader } from "./SkillLoader.js";
-import type {
-  Skill,
-  SkillMatch,
-  SkillResult,
-  SkillExecutionContext,
-} from "./types.js";
+import type { Skill } from "./types.js";
 
 export class SkillRegistry {
   private skills: Map<string, Skill> = new Map();
@@ -114,89 +109,6 @@ export class SkillRegistry {
     limit = 3,
   ): Array<{ skill: Skill; score: number }> {
     return this.loader.findTopMatches(input, this.getAll(), limit);
-  }
-
-  async execute(
-    name: string,
-    context: SkillExecutionContext,
-  ): Promise<SkillResult> {
-    const skill = this.skills.get(name);
-
-    if (!skill) {
-      return {
-        success: false,
-        output: `Skill not found: ${name}`,
-        error: "Skill not registered",
-      };
-    }
-
-    return this.executeSkill(skill, context);
-  }
-
-  async executeByTrigger(
-    input: string,
-    context: SkillExecutionContext,
-  ): Promise<SkillResult> {
-    const skill = this.findByTrigger(input);
-
-    if (!skill) {
-      return {
-        success: false,
-        output: `No matching skill found for: ${input}`,
-        error: "No matching skill",
-      };
-    }
-
-    return this.executeSkill(skill, { ...context, input });
-  }
-
-  private async executeSkill(
-    skill: Skill,
-    context: SkillExecutionContext,
-  ): Promise<SkillResult> {
-    this.logger.info(`Executing skill: ${skill.name}`);
-
-    try {
-      const output = await this.executeInstructions(
-        skill.instructions,
-        context,
-      );
-
-      return {
-        success: true,
-        output,
-        artifacts: [],
-      };
-    } catch (error) {
-      this.logger.error(
-        `Skill execution failed: ${skill.name}`,
-        error as Error,
-      );
-
-      return {
-        success: false,
-        output: "",
-        error: skill.errorHandling || (error as Error).message,
-      };
-    }
-  }
-
-  private async executeInstructions(
-    instructions: string[],
-    context: SkillExecutionContext,
-  ): Promise<string> {
-    const results: string[] = [];
-
-    for (let i = 0; i < instructions.length; i++) {
-      const instruction = instructions[i];
-      this.logger.debug(
-        `Executing instruction ${i + 1}/${instructions.length}: ${instruction.substring(0, 50)}...`,
-      );
-
-      results.push(`[${i + 1}] ${instruction}`);
-    }
-
-    return results.join("\n");
   }
 
   hasSkill(name: string): boolean {
