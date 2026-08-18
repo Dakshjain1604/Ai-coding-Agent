@@ -6,6 +6,7 @@ import chalk from "chalk";
 import crypto from "crypto";
 
 export interface LLMCallMetrics {
+  turnNumber: number;
   provider: string;
   model: string;
   inputTokens: number;
@@ -16,6 +17,7 @@ export interface LLMCallMetrics {
 }
 
 export interface ToolCallMetrics {
+  turnNumber: number;
   name: string;
   durationMs: number;
   success: boolean;
@@ -73,7 +75,7 @@ export class TelemetryCollector {
 
   public recordLLMCall(
     _sessionId: string,
-    _turnNumber: number,
+    turnNumber: number,
     provider: string,
     model: string,
     tokens: { promptTokens: number; completionTokens: number; totalTokens: number },
@@ -82,6 +84,7 @@ export class TelemetryCollector {
   ): void {
     if (!this.enabled) return;
     this.llmCalls.push({
+      turnNumber,
       provider,
       model,
       inputTokens: tokens.promptTokens,
@@ -94,7 +97,7 @@ export class TelemetryCollector {
 
   public recordToolCall(
     _sessionId: string,
-    _turnNumber: number,
+    turnNumber: number,
     name: string,
     _args: Record<string, unknown>,
     success: boolean,
@@ -103,6 +106,7 @@ export class TelemetryCollector {
   ): void {
     if (!this.enabled) return;
     this.toolCalls.push({
+      turnNumber,
       name,
       durationMs,
       success,
@@ -132,7 +136,14 @@ export class TelemetryCollector {
 
     const providerBreakdown: Record<string, { calls: number; tokens: number; cost: number }> = {};
 
-    for (const call of this.llmCalls) {
+    // Scoped to this turn only — the arrays are never cleared (a
+    // resettable session-lifetime log is intentional, e.g. for future
+    // session-total reporting), so without this filter a later turn's
+    // summary would silently include every earlier turn's calls too.
+    const turnLLMCalls = this.llmCalls.filter((c) => c.turnNumber === turnNumber);
+    const turnToolCalls = this.toolCalls.filter((c) => c.turnNumber === turnNumber);
+
+    for (const call of turnLLMCalls) {
       promptTokens += call.inputTokens;
       completionTokens += call.outputTokens;
       totalTokens += call.totalTokens;
@@ -151,7 +162,7 @@ export class TelemetryCollector {
     let failedTools = 0;
     const toolBreakdown: Record<string, { calls: number; failed: number }> = {};
 
-    for (const tool of this.toolCalls) {
+    for (const tool of turnToolCalls) {
       totalToolDurationMs += tool.durationMs;
       if (!tool.success) failedTools++;
 
@@ -164,9 +175,9 @@ export class TelemetryCollector {
 
     return {
       turnNumber,
-      totalLLMCalls: this.llmCalls.length,
+      totalLLMCalls: turnLLMCalls.length,
       totalLLMDurationMs,
-      totalToolCalls: this.toolCalls.length,
+      totalToolCalls: turnToolCalls.length,
       totalToolDurationMs,
       failedTools,
       promptTokens,
