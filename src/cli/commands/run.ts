@@ -56,6 +56,9 @@ export default class RunCommand extends Command {
       getPermissionSystem().allowAll();
     }
 
+    // Validate providers are available
+    await validateProviders();
+
     // Create task
     const task: Task = {
       id: uuid(),

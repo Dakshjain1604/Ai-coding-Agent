@@ -5,9 +5,21 @@
 import { Command, Args, Flags } from "@oclif/core";
 import chalk from "chalk";
 import inquirer from "inquirer";
+import { minimatch } from "minimatch";
 import { generateUnifiedDiff, applyDiff } from "../../utils/diff-merge.js";
 import { getTaskManager } from "../../utils/task-manager.js";
 import { join } from "path";
+
+/**
+ * --exclude is documented as a glob pattern (e.g. "*.test.ts"), not a
+ * regex. Previously `new RegExp(flags.exclude)` was called directly on
+ * it, which throws a SyntaxError on any pattern starting with `*`
+ * ("Nothing to repeat") — crashing the whole apply command on the single
+ * most natural exclude pattern a user would type.
+ */
+export function shouldExclude(path: string, excludePattern: string | undefined): boolean {
+  return !!excludePattern && minimatch(path, excludePattern);
+}
 
 export default class ApplyCommand extends Command {
   static description =
@@ -89,7 +101,7 @@ export default class ApplyCommand extends Command {
     }
 
     for (const diff of diffs) {
-      if (flags.exclude && diff.path.match(new RegExp(flags.exclude))) {
+      if (shouldExclude(diff.path, flags.exclude)) {
         this.log(
           chalk.gray(`  Skipping ${diff.path} (matched exclude pattern)`),
         );
