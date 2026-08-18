@@ -28,7 +28,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { formatProviderLines } from "../../src/cli/commands/config.js";
-import { createConfigManager } from "../../src/utils/config.js";
+import { createConfigManager, setConfig, getConfigManager } from "../../src/utils/config.js";
 import type { ProviderConfig } from "../../src/utils/types.js";
 
 describe("formatProviderLines — the array/Object.entries fix", () => {
@@ -124,5 +124,48 @@ describe("ConfigManager load()+save() — the `config init` fix", () => {
 
     const written = JSON.parse(readFileSync(join(dir, "coding-agent.json"), "utf-8"));
     expect(written.defaults.maxParallelAgents).toBe(42);
+  });
+});
+
+describe("ConfigCommand.set() — the persistence fix", () => {
+  let dir: string;
+
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ConfigCommand.set() calls setConfig() (which only ever mutated the
+  // in-memory ConfigManager singleton) and then, as of this fix,
+  // getConfigManager().save() right after. Before the fix, `config set`
+  // printed "Configuration updated" but the change was discarded the
+  // moment the one-shot CLI process exited — the next `config get` (a
+  // fresh process, a fresh ConfigManager) never saw it. Confirmed live:
+  // set providers.4.apiKey, immediately got "Configuration updated",
+  // then `config get providers.4.apiKey` reported "not found".
+  it("a value set via setConfig() + save() survives a fresh ConfigManager instance (simulating a new process)", () => {
+    dir = mkdtempSync(join(tmpdir(), "config-set-persist-"));
+    const first = createConfigManager(dir);
+    first.load();
+
+    setConfig("defaults.maxParallelAgents", 7);
+    getConfigManager().save();
+
+    // A brand-new ConfigManager against the same directory — nothing
+    // shares in-memory state with `first` other than the file on disk.
+    const second = createConfigManager(dir);
+    expect(second.getConfigValue("defaults.maxParallelAgents")).toBe(7);
+  });
+
+  it("actually writes the file to disk (not just updating the in-memory singleton)", () => {
+    dir = mkdtempSync(join(tmpdir(), "config-set-persist-file-"));
+    createConfigManager(dir).load();
+    expect(existsSync(join(dir, "coding-agent.json"))).toBe(false);
+
+    setConfig("defaults.streaming", false);
+    getConfigManager().save();
+
+    expect(existsSync(join(dir, "coding-agent.json"))).toBe(true);
+    const written = JSON.parse(readFileSync(join(dir, "coding-agent.json"), "utf-8"));
+    expect(written.defaults.streaming).toBe(false);
   });
 });

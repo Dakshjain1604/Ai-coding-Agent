@@ -97,14 +97,22 @@ export default class ConfigCommand extends Command {
       this.error("Please specify both key and value");
     }
 
+    // setConfig() only ever mutated the in-memory ConfigManager singleton
+    // — nothing called .save() afterward, so "Configuration updated"
+    // was true only for the remainder of this one-shot CLI process,
+    // which exits immediately after printing it. The change was
+    // silently discarded every single time; the next `config get`/
+    // `config list` (a fresh process) never saw it. Confirmed live: set
+    // a providers.N.apiKey, immediately got "Configuration updated",
+    // then `config get` on that exact key reported "not found".
     try {
       const parsedValue = JSON.parse(value);
       setConfig(key, parsedValue);
-      this.log(chalk.green(`Configuration updated: ${key} = ${value}`));
     } catch {
       setConfig(key, value);
-      this.log(chalk.green(`Configuration updated: ${key} = ${value}`));
     }
+    getConfigManager().save();
+    this.log(chalk.green(`Configuration updated: ${key} = ${value}`));
   }
 
   private async list(): Promise<void> {
