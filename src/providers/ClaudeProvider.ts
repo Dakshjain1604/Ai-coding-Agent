@@ -3,7 +3,7 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import type { CompletionOptions, StreamChunk } from "../utils/types.js";
+import type { CompletionOptions, StreamChunk, ToolCall } from "../utils/types.js";
 import {
   BaseProvider,
   type ChatMessage,
@@ -175,6 +175,16 @@ export class ClaudeProvider extends BaseProvider {
     const systemMessage = messages.find((m) => m.role === "system");
     const otherMessages = messages.filter((m) => m.role !== "system");
 
+    const claudeTools = options?.tools?.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: {
+        type: "object" as const,
+        properties: t.parameters.properties || {},
+        required: t.parameters.required,
+      },
+    }));
+
     const stream = this.client.messages.stream({
       model,
       max_tokens: maxTokens,
@@ -187,21 +197,56 @@ export class ClaudeProvider extends BaseProvider {
       temperature: options?.temperature,
       top_p: options?.topP,
       stop_sequences: options?.stopSequences,
+      tools: claudeTools && claudeTools.length > 0 ? claudeTools : undefined,
     });
+
+    // Claude streams tool_use blocks as: content_block_start (id + name,
+    // empty input) -> N x content_block_delta with input_json_delta
+    // (partial_json string fragments) -> content_block_stop. Track
+    // fragments by block index and only parse once the block closes.
+    const byIndex = new Map<number, { id: string; name: string; jsonStr: string }>();
+    const toolCalls: ToolCall[] = [];
 
     for await (const event of stream) {
       if (
-        event.type === "content_block_delta" &&
-        event.delta.type === "text_delta"
+        event.type === "content_block_start" &&
+        event.content_block.type === "tool_use"
       ) {
-        yield {
-          content: event.delta.text,
-          done: false,
-        };
+        byIndex.set(event.index, {
+          id: event.content_block.id,
+          name: event.content_block.name,
+          jsonStr: "",
+        });
+      } else if (event.type === "content_block_delta") {
+        if (event.delta.type === "text_delta") {
+          yield {
+            content: event.delta.text,
+            done: false,
+          };
+        } else if (event.delta.type === "input_json_delta") {
+          const entry = byIndex.get(event.index);
+          if (entry) entry.jsonStr += event.delta.partial_json;
+        }
+      } else if (event.type === "content_block_stop") {
+        const entry = byIndex.get(event.index);
+        if (entry) {
+          let params: Record<string, unknown> = {};
+          try {
+            params = entry.jsonStr ? JSON.parse(entry.jsonStr) : {};
+          } catch {
+            params = {};
+          }
+          toolCalls.push({ id: entry.id, name: entry.name, params });
+          byIndex.delete(event.index);
+        }
       }
     }
 
-    yield { content: "", done: true };
+    yield {
+      content: "",
+      done: true,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    };
   }
 
   async embed(_text: string): Promise<number[]> {

@@ -38,11 +38,34 @@ export class ParallelOrchestrator {
    * Execute a sequence of subtasks, each as a fresh, permission-narrowed
    * child agent. Stops at the first failure. `depth` is the nesting level
    * of the *caller* (0 for a top-level agent); this call runs at depth+1.
+   *
+   * `parentToolNames` distinguishes two real callers with different
+   * meanings, NOT interchangeable:
+   *  - subagent-tool.ts (spawn_subagent) always passes a real live
+   *    parent's actual tool names — an empty array there genuinely means
+   *    "this parent has zero tools," and narrowing to zero is the correct,
+   *    fail-closed security behavior (a child can never exceed its
+   *    parent's granted capabilities).
+   *  - AgentSpawner.executeTask()'s direct pipeline path (a task that
+   *    TaskAnalyzer classified as multi-stage) has NO real parent agent at
+   *    all — it's the root of execution, not a child of anything. Passing
+   *    `[]` there used to trigger the SAME fail-closed narrowing and
+   *    silently strip every tool from every pipeline stage. Confirmed
+   *    live: a 3-stage plan→code→test pipeline's 'code' stage received
+   *    ZERO tools, the model still attempted a file_write call anyway
+   *    (driven by its own training plus the system prompt's "Available
+   *    tools: ..." text), and Groq's API hard-rejected the resulting
+   *    call with 400 "Parsing failed" / "Tool choice is none, but model
+   *    called a tool" since there was no `tools` schema to validate it
+   *    against — every top-level pipeline run failed this way, not just
+   *    an edge case. `undefined` (the default) means "no real parent —
+   *    skip narrowing entirely," which is what AgentSpawner's call site
+   *    now passes.
    */
   public async executePipeline(
     parentTask: Task,
     subtasks: SubTaskPlan[],
-    parentToolNames: string[] = [],
+    parentToolNames?: string[],
     depth: number = 0,
   ): Promise<TaskResult> {
     if (depth >= MAX_SUBAGENT_DEPTH) {
@@ -69,7 +92,9 @@ export class ParallelOrchestrator {
       );
 
       const agent = new UniversalAgent(plan.mode);
-      this.narrowChildTools(agent, parentToolNames);
+      if (parentToolNames !== undefined) {
+        this.narrowChildTools(agent, parentToolNames);
+      }
 
       // Exclude the parent task's own `mode` from the spread — the parent
       // might have been run with an explicit --mode, and blindly
@@ -138,16 +163,13 @@ export class ParallelOrchestrator {
     parentToolNames: string[],
   ): void {
     // Fails closed: an empty parentToolNames means "parent has zero known
-    // tools" (or the caller has no real info to narrow against), so the
-    // child gets zero additional tools too — never the reverse. The
-    // previous version treated an empty list as "skip narrowing entirely",
-    // which would have handed a child its full mode tool set the moment
-    // parentToolNames was ever empty, silently violating the stated
-    // invariant that a child can never have more capability than its
-    // parent granted it. Not currently reachable via the one real caller
-    // (subagent-tool.ts always passes a live agent's real tool names), but
-    // this is exactly the kind of security invariant that should hold
-    // structurally, not just because nothing exercises the gap today.
+    // tools", so the child gets zero additional tools too — never the
+    // reverse. This method must only be called when there IS a real
+    // parent to narrow against (see executePipeline's caller-distinction
+    // comment above) — a genuinely top-level pipeline run with no parent
+    // agent at all must skip calling this entirely, not call it with `[]`,
+    // or every stage silently loses every tool (confirmed live: this was
+    // a real, previously-shipped bug, not just a hypothetical one).
     const parentSet = new Set(parentToolNames);
     for (const tool of agent.getTools()) {
       const allowed = !CHILD_RESTRICTED_TOOLS.has(tool.name) && parentSet.has(tool.name);

@@ -22,7 +22,7 @@ import type {
 import { ProviderFactory } from "../../src/providers/ProviderFactory.js";
 import { resetModelRouter } from "../../src/providers/ModelRouter.js";
 import { resetMemoryManager, getMemoryManager } from "../../src/memory/MemoryManager.js";
-import type { ProviderType } from "../../src/utils/types.js";
+import type { ProviderType, CompletionOptions } from "../../src/utils/types.js";
 
 /** A script entry is either a successful completion or a thrown error —
  * used to test the retry/fallback loop's failure-classification behavior. */
@@ -42,6 +42,8 @@ export class FakeProvider extends BaseProvider {
   private callIndex = 0;
   /** Every call's message list, in order — for asserting what the agent sent. */
   public calls: ChatMessage[][] = [];
+  /** Every call's options (notably .tools), in order, alongside `calls`. */
+  public callOptions: Array<CompletionOptions | undefined> = [];
 
   constructor(
     private readonly script: ScriptEntry[],
@@ -71,15 +73,23 @@ export class FakeProvider extends BaseProvider {
     };
   }
 
-  async complete(messages: ChatMessage[]): Promise<CompletionResult> {
+  async complete(
+    messages: ChatMessage[],
+    options?: CompletionOptions,
+  ): Promise<CompletionResult> {
     this.calls.push(messages);
+    this.callOptions.push(options);
     const entry = this.nextEntry();
     if (isThrowEntry(entry)) throw entry.__throws;
     return entry;
   }
 
-  async *stream(messages: ChatMessage[]): AsyncIterable<StreamChunk> {
+  async *stream(
+    messages: ChatMessage[],
+    options?: CompletionOptions,
+  ): AsyncIterable<StreamChunk> {
     this.calls.push(messages);
+    this.callOptions.push(options);
     const entry = this.nextEntry();
     if (isThrowEntry(entry)) throw entry.__throws;
     // One chunk carrying the full content is enough to exercise the real

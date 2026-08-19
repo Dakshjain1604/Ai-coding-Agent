@@ -89,6 +89,25 @@ describe("GroqProvider — native tool-calling fix", () => {
     ]);
   });
 
+  // Regression for a live-reproduced flake: Groq's real API intermittently
+  // rejected an otherwise-valid request with 400 "Tool choice is none, but
+  // model called a tool" when tool_choice was left unset (the implicit
+  // default). Sending it explicitly stopped reproducing the failure across
+  // repeated live attempts against the real API.
+  it("sends an explicit tool_choice: 'auto' whenever tools are present", async () => {
+    createMock.mockResolvedValue(chatCompletion());
+    await makeProvider().complete(userMsg, {
+      tools: [{ name: "file_read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+    });
+    expect(createMock.mock.calls[0][0].tool_choice).toBe("auto");
+  });
+
+  it("does not send a tool_choice field when no tools are requested", async () => {
+    createMock.mockResolvedValue(chatCompletion());
+    await makeProvider().complete(userMsg);
+    expect(createMock.mock.calls[0][0].tool_choice).toBeUndefined();
+  });
+
   it("does not send a tools field when no tools are requested", async () => {
     createMock.mockResolvedValue(chatCompletion());
     const provider = makeProvider();
@@ -199,6 +218,47 @@ describe("GroqProvider — complete() general behavior", () => {
   });
 });
 
+// Regression coverage for a live, reproduced 413 "Request too large" error:
+// SystemAnalyzer sizes maxTokens from LOCAL machine capacity (up to 64000
+// on an "optimal" machine, but as low as 8000 even on "critical" — a
+// real, observed value on a memory-constrained dev machine), which
+// BaseAgent then forwards verbatim as CompletionOptions.maxTokens. Groq's
+// free tier enforces an 8000 TPM ceiling per model that counts input +
+// reserved max_tokens together — a maxTokens of 8000 alone consumes the
+// entire budget before a single input token is counted, failing even a
+// ~294-token prompt. Confirmed via live instrumentation of the actual
+// request against Groq's real API.
+describe("GroqProvider — free-tier max_tokens clamp", () => {
+  it("clamps an oversized requested maxTokens (e.g. from SystemAnalyzer's local sizing) down to the free-tier-safe ceiling", async () => {
+    createMock.mockResolvedValue(chatCompletion());
+    await makeProvider().complete(userMsg, { maxTokens: 64000 });
+    expect(createMock.mock.calls[0][0].max_tokens).toBeLessThanOrEqual(2048);
+  });
+
+  it("clamps an oversized requested maxTokens on the streaming path too", async () => {
+    async function* fakeStream() {
+      yield { choices: [{ delta: { content: "ok" } }] };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    for await (const _ of makeProvider().stream(userMsg, { maxTokens: 8000 })) {
+      // drain
+    }
+    expect(createMock.mock.calls[0][0].max_tokens).toBeLessThanOrEqual(2048);
+  });
+
+  it("leaves a small, already-safe requested maxTokens untouched", async () => {
+    createMock.mockResolvedValue(chatCompletion());
+    await makeProvider().complete(userMsg, { maxTokens: 512 });
+    expect(createMock.mock.calls[0][0].max_tokens).toBe(512);
+  });
+
+  it("falls back to a safe default (not 4096 uncapped) when maxTokens is unset", async () => {
+    createMock.mockResolvedValue(chatCompletion());
+    await makeProvider().complete(userMsg);
+    expect(createMock.mock.calls[0][0].max_tokens).toBeLessThanOrEqual(2048);
+  });
+});
+
 describe("GroqProvider — isAvailable/getModels/estimateCost/embed", () => {
   it("isAvailable() returns true when models.list() succeeds", async () => {
     modelsListMock.mockResolvedValue({ data: [] });
@@ -243,7 +303,8 @@ describe("GroqProvider — stream()", () => {
     for await (const chunk of makeProvider().stream(userMsg)) {
       chunks.push(chunk);
     }
-    expect(chunks.map((c) => c.content)).toEqual(["hel", "lo"]);
+    expect(chunks.slice(0, -1).map((c) => c.content)).toEqual(["hel", "lo"]);
+    expect(chunks[chunks.length - 1]).toMatchObject({ content: "", done: true });
   });
 
   it("wraps a streaming error as a ProviderError", async () => {
@@ -253,5 +314,95 @@ describe("GroqProvider — stream()", () => {
     // begins, so calling .next() is what actually triggers (and lets us
     // catch) the underlying request rejection.
     await expect(provider.stream(userMsg).next()).rejects.toThrow(/stream failed/);
+  });
+
+  it("forwards tools to the streaming request in OpenAI function-calling shape", async () => {
+    async function* fakeStream() {
+      yield { choices: [{ delta: { content: "ok" } }] };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    const tools = [
+      {
+        name: "search",
+        description: "search things",
+        parameters: { type: "object" as const, properties: { q: { type: "string" } } },
+      },
+    ];
+    for await (const _ of makeProvider().stream(userMsg, { tools })) {
+      // drain
+    }
+    expect(createMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stream: true,
+        tools: [
+          {
+            type: "function",
+            function: { name: "search", description: "search things", parameters: tools[0].parameters },
+          },
+        ],
+      }),
+    );
+  });
+
+  it("does not send a tools field on the streaming request when no tools are requested", async () => {
+    async function* fakeStream() {
+      yield { choices: [{ delta: { content: "ok" } }] };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    for await (const _ of makeProvider().stream(userMsg)) {
+      // drain
+    }
+    expect(createMock).toHaveBeenCalledWith(
+      expect.objectContaining({ tools: undefined }),
+    );
+  });
+
+  it("accumulates streamed tool_call argument fragments into a completed toolCalls array on the final chunk", async () => {
+    async function* fakeStream() {
+      yield {
+        choices: [
+          { delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "search", arguments: "" } }] } },
+        ],
+      };
+      yield {
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"q":' } }] } }],
+      };
+      yield {
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '"cats"}' } }] } }],
+      };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    const chunks: Array<{ content: string; done: boolean; toolCalls?: unknown }> = [];
+    for await (const chunk of makeProvider().stream(userMsg)) {
+      chunks.push(chunk);
+    }
+    const last = chunks[chunks.length - 1];
+    expect(last.done).toBe(true);
+    expect(last.toolCalls).toEqual([{ id: "call_1", name: "search", params: { q: "cats" } }]);
+  });
+
+  it("leaves toolCalls undefined on the final chunk when no tool_calls were streamed", async () => {
+    async function* fakeStream() {
+      yield { choices: [{ delta: { content: "plain text" } }] };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    const chunks: Array<{ toolCalls?: unknown }> = [];
+    for await (const chunk of makeProvider().stream(userMsg)) {
+      chunks.push(chunk);
+    }
+    expect(chunks[chunks.length - 1].toolCalls).toBeUndefined();
+  });
+
+  it("sends an explicit tool_choice: 'auto' on the streaming request whenever tools are present", async () => {
+    async function* fakeStream() {
+      yield { choices: [{ delta: { content: "ok" } }] };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    for await (const _ of makeProvider().stream(userMsg, {
+      tools: [{ name: "file_read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+    })) {
+      // drain
+    }
+    expect(createMock.mock.calls[0][0].tool_choice).toBe("auto");
   });
 });

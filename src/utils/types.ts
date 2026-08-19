@@ -47,7 +47,27 @@ export type AgentType =
 export interface AgentConfig {
   type: AgentType;
   model: string;
+  /**
+   * Context/history BUDGET — what truncateMessages() sizes the whole
+   * conversation (system prompt + tool schemas + history) against. Not
+   * the same thing as a single response's generation length; conflating
+   * the two under one field used to mean a cloud provider's genuinely
+   * large context window (128K+) got starved down to whatever this
+   * laptop's current local system load allowed for an Ollama model,
+   * which is a category error — see initializeContext()'s comment.
+   */
   maxTokens: number;
+  /**
+   * OUTPUT reservation sent to the provider as `max_tokens` — how long a
+   * single response is allowed to be. Deliberately NOT derived from
+   * `maxTokens`/context-window size: a model with a 128K context window
+   * doesn't need a 64K output reservation for an ordinary turn, and
+   * asking for one is wasted/risky on providers with their own per-call
+   * ceilings (see GroqProvider's free-tier clamp). Optional so existing
+   * callers that only ever set `maxTokens` keep working — see call sites
+   * for the fallback.
+   */
+  outputMaxTokens?: number;
   tools: string[];
   maxIterations: number;
   timeout: number;
@@ -128,6 +148,15 @@ export interface CompletionOptions {
 export interface StreamChunk {
   content: string;
   done: boolean;
+  /**
+   * Native tool calls accumulated across the stream, attached to the final
+   * (done: true) chunk only. Providers whose SDK streams tool-call deltas
+   * incrementally (OpenAI-compatible `delta.tool_calls[].function.arguments`
+   * fragments, Claude's input_json_delta events, etc.) must merge those
+   * fragments internally and surface the completed calls here — consumers
+   * should never see partial/unparsable tool call JSON mid-stream.
+   */
+  toolCalls?: ToolCall[];
 }
 
 // ============================================================================

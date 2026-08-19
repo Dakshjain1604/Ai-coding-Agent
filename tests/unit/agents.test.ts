@@ -267,4 +267,56 @@ describe("UniversalAgent & Mode Management", () => {
       expect(result.agentType).toBe("review");
     });
   });
+
+  // Regression tests for a real, live-reproduced bug: a turn with no tool
+  // calls AND no text (0 completion tokens — confirmed live on a real
+  // SWE-bench task run against Groq's gpt-oss-20b, immediately after a
+  // real tool result) used to be treated identically to a legitimate "I'm
+  // done, here's my final answer" turn — the loop broke and returned
+  // success:true with a blank output, with no error, no retry, nothing to
+  // indicate the task hadn't actually been completed.
+  describe("execute() empty-response handling (blank-completion-as-success fix)", () => {
+    let env: FakeAgentEnv;
+
+    afterEach(() => {
+      env?.cleanup();
+    });
+
+    it("nudges the model to continue after a blank response, and succeeds with the next real answer instead of silently returning blank output", async () => {
+      env = setupFakeAgentEnv([
+        scriptedResult(""),
+        scriptedResult("Fixed the bug in separable.py."),
+      ]);
+      const agent = new UniversalAgent("debug");
+      const result = await agent.execute({
+        id: "t-blank-recover",
+        description: "diagnose and fix the issue",
+        complexity: "simple",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe("Fixed the bug in separable.py.");
+    });
+
+    it("gives up honestly (success:false) instead of silently succeeding, after repeated consecutive blank responses", async () => {
+      // FakeProvider repeats the last scripted entry once the script is
+      // exhausted — a single blank entry means every call returns blank.
+      env = setupFakeAgentEnv([scriptedResult("")]);
+      const agent = new UniversalAgent("debug");
+      const result = await agent.execute({
+        id: "t-blank-exhausted",
+        description: "diagnose and fix the issue",
+        complexity: "simple",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("consecutive empty responses");
+    });
+  });
 });

@@ -19,10 +19,12 @@
 import { describe, it, expect } from "vitest";
 import {
   parseMarkdownCodeBlock,
+  parseFencedToolCallNoClosingFence,
   parseJsonObject,
   parseXmlStyle,
   parseToolCallTag,
   parseToolCalls,
+  hasIncompleteToolCallAttempt,
 } from "../../src/core/agents/tool-parser.js";
 
 const KNOWN = new Set([
@@ -93,6 +95,34 @@ describe("parseMarkdownCodeBlock", () => {
     expect(calls).toEqual([]);
   });
 
+  // Regression, confirmed live: a real NVIDIA-hosted model (SWE-bench
+  // task, real astropy investigation) put the tool name and JSON body on
+  // ONE line, separated by spaces — "```tool file_read {...}```" — not
+  // the newline-separated shape every other test here uses. The old
+  // `\n`-only regex silently dropped this entirely: not a parse failure
+  // the model could see and recover from, just zero tool calls executed
+  // and the loop moving on as if nothing had been attempted.
+  it("parses the tool name and JSON body crammed onto a single line, separated by spaces", () => {
+    const calls = parseMarkdownCodeBlock(
+      '```tool file_read {"path": "astropy/modeling/separable.py", "encoding": "utf-8"}```',
+      KNOWN,
+    );
+    expect(calls).toEqual([
+      {
+        name: "file_read",
+        params: { path: "astropy/modeling/separable.py", encoding: "utf-8" },
+      },
+    ]);
+  });
+
+  it("still parses the original newline-separated shape unchanged", () => {
+    const calls = parseMarkdownCodeBlock(
+      '```tool\nfile_read\n{"path": "x.ts"}\n```',
+      KNOWN,
+    );
+    expect(calls).toEqual([{ name: "file_read", params: { path: "x.ts" } }]);
+  });
+
   it("does not match a language-tagged fence glued to the same line (```javascript)", () => {
     // The regex requires a newline between the fence/optional 'tool' tag
     // and the name — a same-line language tag like ```javascript never
@@ -153,6 +183,72 @@ describe("parseMarkdownCodeBlock", () => {
   });
 });
 
+// Regression, confirmed live: the SAME real NVIDIA-hosted model, on the
+// same real SWE-bench task, sometimes closed its ```tool fence and
+// sometimes didn't — for the identical "name + JSON on one line" shape.
+// Strategy 1 (parseMarkdownCodeBlock) depends on a literal closing fence
+// to know where the JSON body ends; without one, it silently produced
+// zero tool calls. Not a parse failure visible to the model — the
+// attempted file_read simply never happened, and the loop moved on as if
+// nothing had been tried.
+describe("parseFencedToolCallNoClosingFence", () => {
+  it("parses a fenced tool call with no closing fence at all, using balanced-brace JSON extraction", () => {
+    const calls = parseFencedToolCallNoClosingFence(
+      '```tool file_read {"path": "astropy/modeling/separable.py", "encoding": "utf-8"}',
+      KNOWN,
+    );
+    expect(calls).toEqual([
+      {
+        name: "file_read",
+        params: { path: "astropy/modeling/separable.py", encoding: "utf-8" },
+      },
+    ]);
+  });
+
+  it("stops at the JSON object's real end even with trailing prose and no closing fence", () => {
+    const calls = parseFencedToolCallNoClosingFence(
+      '```tool search_content {"pattern": "foo"} and that should find it',
+      KNOWN,
+    );
+    expect(calls).toEqual([
+      { name: "search_content", params: { pattern: "foo" } },
+    ]);
+  });
+
+  it("filters out an unknown tool name", () => {
+    const calls = parseFencedToolCallNoClosingFence(
+      '```tool not_a_real_tool {"x": 1}',
+      KNOWN,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("does not guess a params object when no JSON body follows the tool name", () => {
+    const calls = parseFencedToolCallNoClosingFence(
+      "```tool file_read just some prose, no braces at all",
+      KNOWN,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("does not crash on malformed JSON after a real tool name", () => {
+    expect(() =>
+      parseFencedToolCallNoClosingFence('```tool file_read {"path":', KNOWN),
+    ).not.toThrow();
+    expect(
+      parseFencedToolCallNoClosingFence('```tool file_read {"path":', KNOWN),
+    ).toEqual([]);
+  });
+
+  it("parseToolCalls() falls through to this strategy when Strategy 1 (closing-fence-dependent) finds nothing", () => {
+    const calls = parseToolCalls(
+      '```tool file_read {"path": "x.ts"}',
+      KNOWN,
+    );
+    expect(calls).toEqual([{ name: "file_read", params: { path: "x.ts" } }]);
+  });
+});
+
 describe("parseJsonObject", () => {
   it('parses {"tool": X, "params": {...}}', () => {
     const calls = parseJsonObject(
@@ -176,6 +272,27 @@ describe("parseJsonObject", () => {
       KNOWN,
     );
     expect(calls).toEqual([{ name: "test_run", params: { coverage: true } }]);
+  });
+
+  // Regression, confirmed live: a real NVIDIA-hosted model, on a real
+  // SWE-bench task, consistently used {"name": X, "parameters": {...}}
+  // (the standard OpenAI-style function-calling schema's own field name)
+  // — not "params"/"arguments"/"input". Without this alias, the tool
+  // still got recognized by name but silently ran with an EMPTY params
+  // object every time: file_read executed 10 times in a row, each one
+  // failing "Missing required parameter: path", never once actually
+  // reading the file, until the task ran out its execution budget.
+  it('parses the OpenAI-style key shape {"name": X, "parameters": {...}}', () => {
+    const calls = parseJsonObject(
+      '{"name": "file_read", "parameters": {"path": "astropy/modeling/separable.py", "encoding": "utf-8"}}',
+      KNOWN,
+    );
+    expect(calls).toEqual([
+      {
+        name: "file_read",
+        params: { path: "astropy/modeling/separable.py", encoding: "utf-8" },
+      },
+    ]);
   });
 
   it("filters out an unknown tool name", () => {
@@ -441,5 +558,50 @@ describe("parseToolCalls (master, strategy precedence)", () => {
       planModeTools,
     );
     expect(calls).toEqual([]);
+  });
+});
+
+describe("hasIncompleteToolCallAttempt", () => {
+  it("detects a real ```tool fence whose JSON body is truncated mid-string (no closing brace)", () => {
+    // Reproduces a real live failure: a free-tier OpenRouter model's
+    // response was cut off mid-generation, leaving the "content" string
+    // value (and the outer object) unclosed — parseToolCalls() correctly
+    // returns [] for this (nothing to safely guess at), but the caller
+    // must still be able to tell this apart from a genuine final answer.
+    const output =
+      '```tool\nfile_write\n{\n  "path": "a.py",\n  "content": "some file content that never closes';
+    expect(parseToolCalls(output, KNOWN)).toEqual([]);
+    expect(hasIncompleteToolCallAttempt(output, KNOWN)).toBe(true);
+  });
+
+  it("detects a ```tool fence with no JSON body at all", () => {
+    const output = "```tool\nfile_write\n";
+    expect(hasIncompleteToolCallAttempt(output, KNOWN)).toBe(true);
+  });
+
+  it("returns false for a genuine final answer with no tool-call syntax", () => {
+    const output = "I've fixed the bug by updating the header parsing logic.";
+    expect(hasIncompleteToolCallAttempt(output, KNOWN)).toBe(false);
+  });
+
+  it("returns false for a genuine final answer containing an unrelated fenced code block", () => {
+    const output =
+      'Here is the fix:\n```python\ndef foo():\n    return 1\n```\nThat should resolve it.';
+    expect(hasIncompleteToolCallAttempt(output, KNOWN)).toBe(false);
+  });
+
+  it("returns false when the fenced tool name isn't a known tool", () => {
+    const output = '```tool\nnot_a_real_tool\n{"broken json';
+    expect(hasIncompleteToolCallAttempt(output, KNOWN)).toBe(false);
+  });
+
+  it("returns false when the tool call actually parsed successfully (not incomplete)", () => {
+    const output = '```tool\nfile_read\n{"path": "x.ts"}\n```';
+    expect(parseToolCalls(output, KNOWN).length).toBe(1);
+    // Still true by this function's own narrow definition (it only checks
+    // for the header, not full-parse success) — the caller in
+    // UniversalAgent only consults it when parseToolCalls() already
+    // returned zero calls, so this case never actually reaches it live.
+    expect(hasIncompleteToolCallAttempt(output, KNOWN)).toBe(true);
   });
 });

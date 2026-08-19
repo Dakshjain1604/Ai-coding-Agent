@@ -322,6 +322,60 @@ describe("ModelRouter — canMakePaidCall()/recordCall() wiring (the fix)", () =
     const result = await router.route("code");
     expect(result.provider.getType()).toBe("groq");
   });
+
+  // Regression, confirmed live: an NVIDIA-only environment (NVIDIA_API_KEY
+  // set, OPENAI_API_KEY absent, no other provider keys) got "No available
+  // providers found" from the real CLI, even though the NVIDIA key worked
+  // perfectly when tested directly against the real API. Root cause:
+  // "openai" is unconditionally in PAID_PROVIDER_TYPES, and the app's own
+  // `fallbackToPaid: false` config default (a deliberate guard against
+  // spending real money) blocked it — with no way to tell "openai" is
+  // actually running for free via NVIDIA apart, since both share the same
+  // ProviderType.
+  it("does NOT treat 'openai' as a paid provider when it's actually running in NVIDIA fallback mode", async () => {
+    const originalOpenAI = process.env.OPENAI_API_KEY;
+    const originalNvidia = process.env.NVIDIA_API_KEY;
+    try {
+      delete process.env.OPENAI_API_KEY;
+      process.env.NVIDIA_API_KEY = "test-nvidia-key";
+      seedProviders(["openai"]);
+      const router = new ModelRouter({
+        preferLocal: false,
+        fallbackToPaid: false, // the app's real default — must not block NVIDIA
+        maxPaidApiCalls: 0, // strictest possible setting
+      });
+      const result = await router.route("code");
+      expect(result.provider.getType()).toBe("openai");
+    } finally {
+      if (originalOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = originalOpenAI;
+      if (originalNvidia === undefined) delete process.env.NVIDIA_API_KEY;
+      else process.env.NVIDIA_API_KEY = originalNvidia;
+    }
+  });
+
+  it("STILL treats 'openai' as a paid provider when it's genuinely running as real OpenAI (OPENAI_API_KEY set)", async () => {
+    const originalOpenAI = process.env.OPENAI_API_KEY;
+    try {
+      process.env.OPENAI_API_KEY = "sk-real-key";
+      // Seed a genuinely free provider too, so a result other than
+      // "openai" is actually reachable — with only "openai" seeded and
+      // correctly blocked as paid, route() would just throw "no available
+      // providers", which wouldn't distinguish "blocked" from "simply
+      // absent".
+      seedProviders(["openai", "local"]);
+      const router = new ModelRouter({
+        preferLocal: false,
+        fallbackToPaid: false,
+        maxPaidApiCalls: 0,
+      });
+      const result = await router.route("code");
+      expect(result.provider.getType()).not.toBe("openai");
+    } finally {
+      if (originalOpenAI === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = originalOpenAI;
+    }
+  });
 });
 
 describe("ModelRouter — routeTo() (explicit override, bypasses the paid cap)", () => {
@@ -385,6 +439,43 @@ describe("ModelRouter — routeToFallback() ordering and exclusion", () => {
       ),
     ).rejects.toThrow(/no available providers/i);
   });
+
+  // Regression: preferQuality used to be silently dropped on every
+  // fallback path (both the top-level "primary provider unavailable" case
+  // and attemptDynamicFallback's mid-task provider swap) — routeToFallback
+  // always called getDefaultModelForCategory regardless of what the
+  // caller asked for. Confirmed live: a real SWE-bench debug-mode task
+  // correctly requested preferQuality on its initial routing, but Groq's
+  // daily quota forced a fallback to OpenRouter, which landed on the
+  // fast/small default model instead of the quality-tier one, with no
+  // code path that could have done otherwise.
+  it("uses the quality tier's model when preferQuality is passed through", async () => {
+    seedProviders(["groq"]);
+    const router = new ModelRouter({ preferLocal: false });
+    const result = await (router as unknown as {
+      routeToFallback: (
+        c: string,
+        t: number,
+        e?: ProviderType[],
+        pq?: boolean,
+      ) => Promise<{ provider: BaseProvider; model: string }>;
+    }).routeToFallback("code", 1000, undefined, true);
+    expect(result.model).toBe("openai/gpt-oss-120b");
+  });
+
+  it("uses the default tier's model when preferQuality is not passed", async () => {
+    seedProviders(["groq"]);
+    const router = new ModelRouter({ preferLocal: false });
+    const result = await (router as unknown as {
+      routeToFallback: (
+        c: string,
+        t: number,
+        e?: ProviderType[],
+        pq?: boolean,
+      ) => Promise<{ provider: BaseProvider; model: string }>;
+    }).routeToFallback("code", 1000);
+    expect(result.model).toBe("openai/gpt-oss-20b");
+  });
 });
 
 describe("ModelRouter — route() default-rule behavior", () => {
@@ -400,6 +491,18 @@ describe("ModelRouter — route() default-rule behavior", () => {
     const router = new ModelRouter({ preferLocal: true });
     const result = await router.route("code");
     expect(result.provider.getType()).toBe("groq");
+  });
+
+  // Regression: route()'s public entry point end-to-end, not just the
+  // private routeToFallback() method directly — proves preferQuality
+  // actually survives the full "default-rule provider unavailable ->
+  // fallback" path a real dynamic-fallback mid-task switch takes.
+  it("preferQuality survives the fallback path end-to-end through the public route() entry point", async () => {
+    seedProviders(["groq"], true); // local unavailable, only groq seeded
+    const router = new ModelRouter({ preferLocal: true });
+    const result = await router.route("code", 1000, { preferQuality: true });
+    expect(result.provider.getType()).toBe("groq");
+    expect(result.model).toBe("openai/gpt-oss-120b");
   });
 
   it("respects the exclude option on the default rule", async () => {
@@ -526,16 +629,18 @@ describe("ModelRouter — cost/latency estimation", () => {
 
 describe("ModelRouter — updateConfig()", () => {
   it("switches the default rule table when preferLocal changes", async () => {
-    // Seed BOTH the cloud-first rule's provider (openrouter, for "code")
-    // and local, so cloud-first genuinely resolves via its own default
-    // rule rather than falling all the way back to local by coincidence
-    // (local sorts first in the generic fallback order regardless of
-    // preferLocal, which would make a "not local" assertion meaningless
-    // if openrouter weren't actually available to prove cloud-first works).
-    seedProviders(["local", "openrouter"], false);
+    // Seed BOTH the cloud-first rule's provider (groq, for "code" — Groq
+    // is the cloud-first primary for latency, OpenRouter the rate-limit
+    // fallback, see CLOUD_FIRST_RULES's comment) and local, so cloud-first
+    // genuinely resolves via its own default rule rather than falling all
+    // the way back to local by coincidence (local sorts first in the
+    // generic fallback order regardless of preferLocal, which would make
+    // a "not local" assertion meaningless if groq weren't actually
+    // available to prove cloud-first works).
+    seedProviders(["local", "groq"], false);
     const router = new ModelRouter({ preferLocal: false });
     const before = await router.route("code");
-    expect(before.provider.getType()).toBe("openrouter");
+    expect(before.provider.getType()).toBe("groq");
 
     router.updateConfig({ preferLocal: true });
     const after = await router.route("code");

@@ -36,11 +36,16 @@ describe("Provider Factory & Model Router", () => {
     expect(codeRule?.provider).toBe("local");
   });
 
+  // Groq is the cloud-first primary (not OpenRouter) for latency — Groq's
+  // free-tier responses are noticeably faster than OpenRouter's, which
+  // adds routing overhead to third-party model hosts (confirmed live).
+  // OpenRouter is still reachable as the rate-limit fallback once Groq's
+  // small per-minute budget is exhausted (see routeToFallback's order).
   it("selects cloud-first default rules when preferLocal is false", () => {
     const router = new ModelRouter({ preferLocal: false });
     const rules = (router as unknown as { defaultRules: Array<{ taskCategory: string; provider: string }> })
       .defaultRules;
     const codeRule = rules.find((r) => r.taskCategory === "code");
-    expect(codeRule?.provider).toBe("openrouter");
+    expect(codeRule?.provider).toBe("groq");
   });
 });

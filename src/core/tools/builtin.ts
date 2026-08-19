@@ -624,7 +624,12 @@ export const gitAdd: ToolDefinition = {
   name: "git_add",
   description: "Stage files for commit",
   parameters: {
-    files: { type: "array", description: "Files to stage", required: true },
+    files: {
+      type: "array",
+      description: "Files to stage",
+      required: true,
+      items: { type: "string" },
+    },
     cwd: { type: "string", description: "Repository path", required: false },
   },
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {

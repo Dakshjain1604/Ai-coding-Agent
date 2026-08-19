@@ -107,6 +107,11 @@ describe("UniversalAgent.execute() end-to-end (real provider-routing chain)", ()
     expect(secondCallText).toContain('"success": true');
   });
 
+  // 20s timeout (not the 5s default): this spawns a real `npx tsc -p .
+  // --noEmit` subprocess against the actual project, which has grown
+  // enough over the course of this session's changes that it now
+  // routinely takes ~5-6s on its own — right at the edge of the default
+  // test timeout, not a logic bug in the tool-call handling being tested.
   it("recognizes a tool call for workspace_verify — regression for the stale KNOWN_TOOLS bug", async () => {
     env = setupFakeAgentEnv([
       scriptedResult(
@@ -122,7 +127,7 @@ describe("UniversalAgent.execute() end-to-end (real provider-routing chain)", ()
     const secondCallText = messagesText(env.provider.calls[1]);
     expect(secondCallText).toContain("```result");
     expect(secondCallText).toContain("workspace_verify");
-  });
+  }, 20000);
 
   it("records real conversation turns via the session-turn wiring (A3), exactly one conversation per task", async () => {
     env = setupFakeAgentEnv([scriptedResult("Done.")]);
@@ -323,6 +328,10 @@ describe("UniversalAgent.execute() end-to-end (real provider-routing chain)", ()
     expect(secondCallText).toContain("```result");
   });
 
+  // 20s timeout (not the 5s default) — real subprocess, see the identical
+  // note on "recognizes a tool call for workspace_verify" above; this one
+  // is slower still since risk:"high" also runs a real `npm run lint`
+  // pass against the project if it defines a lint script.
   it("forces workspace_verify's risk param to 'high' for a high-risk task, regardless of what the model asked for", async () => {
     env = setupFakeAgentEnv([
       scriptedResult(
@@ -339,7 +348,7 @@ describe("UniversalAgent.execute() end-to-end (real provider-routing chain)", ()
     // The model's params never included risk at all — this proves
     // UniversalAgent's effectiveParams override actually happened.
     expect(secondCallText).toContain('"risk": "high"');
-  });
+  }, 20000);
 
   it("treats malformed/garbage output mixed with prose as no tool calls, without crashing", async () => {
     env = setupFakeAgentEnv([

@@ -24,18 +24,31 @@ describe("ProviderRegistry.getModelFor", () => {
     expect(model).toBe("qwen2.5-coder:latest");
   });
 
-  it("openai's default tier responds to NVIDIA fallback env vars", () => {
+  // Model choices confirmed live against NVIDIA's real API
+  // (integrate.api.nvidia.com) with this codebase's real tool schema set —
+  // all three return correct native tool_calls. "meta/llama-3.1-8b-
+  // instruct" (the old default-tier choice here) is now the speed tier;
+  // "z-ai/glm-5.2" replaced it as default (also confirmed live — the
+  // PREVIOUS OpenAIProvider.ts default, "meta/llama-3.3-70b-instruct",
+  // hung indefinitely, 100s+ with no response, never actually reachable).
+  it("openai's tiers respond to NVIDIA fallback env vars, with real distinct per-tier models", () => {
     const originalOpenAI = process.env.OPENAI_API_KEY;
     const originalNvidia = process.env.NVIDIA_API_KEY;
     try {
       delete process.env.OPENAI_API_KEY;
       process.env.NVIDIA_API_KEY = "test-key";
-      expect(getModelFor("openai", "default", "code")).toBe(
+      expect(getModelFor("openai", "default", "code")).toBe("z-ai/glm-5.2");
+      expect(getModelFor("openai", "speed", "code")).toBe(
         "meta/llama-3.1-8b-instruct",
+      );
+      expect(getModelFor("openai", "quality", "code")).toBe(
+        "meta/llama-3.1-70b-instruct",
       );
 
       process.env.OPENAI_API_KEY = "sk-real-key";
       expect(getModelFor("openai", "default", "code")).toBe("gpt-4o");
+      expect(getModelFor("openai", "quality", "code")).toBe("o1-preview");
+      expect(getModelFor("openai", "speed", "code")).toBe("gpt-4o-mini");
     } finally {
       if (originalOpenAI === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = originalOpenAI;

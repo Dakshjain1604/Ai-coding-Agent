@@ -23,7 +23,7 @@ import { getModelRouter } from "../../providers/ModelRouter.js";
 import { getConfigManager } from "../../utils/config.js";
 import { getMemoryManager } from "../../memory/MemoryManager.js";
 import type { MemoryManager } from "../../memory/MemoryManager.js";
-import { parseToolCalls } from "./tool-parser.js";
+import { parseToolCalls, hasIncompleteToolCallAttempt } from "./tool-parser.js";
 import { TelemetryCollector } from "../../telemetry/TelemetryCollector.js";
 import { compactMessages, renderSummaryMessage } from "./Compactor.js";
 import { getHookManager } from "../../hooks/HookManager.js";
@@ -81,6 +81,28 @@ export abstract class BaseAgent {
   private compactionSummary?: string;
   /** How many entries of the append-only history array are already folded into compactionSummary — only messages after this index get sent for (re-)compaction. */
   private compactedThroughIndex = 0;
+  /**
+   * Set by cancel() — checked between iterations of UniversalAgent's main
+   * loop (not mid-call; this isn't a full AbortController threaded into
+   * every provider's fetch(), just a cooperative "don't start another
+   * iteration" flag). AgentSpawner.executeWithTimeout() previously only
+   * rejected its own wrapper promise on timeout — the underlying
+   * agent.execute() call kept running for as long as it wanted, with
+   * nothing ever told to stop. Confirmed live on a real SWE-bench task: a
+   * "timed out after 300000ms" failure was reported to the user, then the
+   * agent kept executing — several MORE tool calls (including a
+   * destructive file_write that corrupted a real source file) — for
+   * minutes afterward, completely unsupervised, consuming API quota the
+   * caller had no visibility into and no way to stop. Checking this flag
+   * at the top of each loop iteration stops that continuation at the next
+   * natural boundary instead of letting it run to its own completion.
+   */
+  protected cancelled = false;
+
+  /** Called by AgentSpawner.executeWithTimeout() when its timeout fires. */
+  cancel(): void {
+    this.cancelled = true;
+  }
 
   constructor(type: AgentType, config: Partial<AgentConfig>) {
     this.id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -96,7 +118,7 @@ export abstract class BaseAgent {
   public getToolSchemas(): ToolSchema[] {
     const schemas: ToolSchema[] = [];
     for (const tool of this.tools.values()) {
-      const props =
+      const rawProps =
         (tool.parameters.properties as Record<string, unknown>) ||
         tool.parameters;
       // AgentTool.parameters is a FLAT map (e.g. {path: {type, required},
@@ -121,6 +143,28 @@ export abstract class BaseAgent {
             (param as { required?: boolean }).required === true,
         )
         .map(([name]) => name);
+      // Each per-property entry still carries our own internal `required`
+      // boolean (used above to build `req`) — that's not a valid JSON
+      // Schema keyword at the property level (only a top-level `required:
+      // string[]` on the object schema is valid), and providers that
+      // actually validate the schema server-side reject it. Confirmed
+      // live against Groq's real API: `properties.encoding.required` on
+      // file_read's schema produced "400 invalid JSON schema ...
+      // '/properties/encoding/required' ... expected array, but got
+      // boolean" — a hard failure, not a warning, once tools actually
+      // started being forwarded to Groq (see GroqProvider.complete/stream).
+      const props = Object.fromEntries(
+        Object.entries(rawProps).map(([name, param]) => {
+          if (typeof param !== "object" || param === null) {
+            return [name, param];
+          }
+          const { required: _required, ...rest } = param as Record<
+            string,
+            unknown
+          >;
+          return [name, rest];
+        }),
+      );
       schemas.push({
         name: tool.name,
         description: tool.description,
@@ -238,7 +282,49 @@ export abstract class BaseAgent {
       maxPaidApiCalls: defaults.maxPaidApiCalls,
     });
     const taskCategory = this.getTaskCategory();
-    const routing = await router.route(taskCategory);
+    // ModelRouter.route()'s `preferQuality` option (-> ProviderRegistry's
+    // "quality" tier, e.g. Groq's openai/gpt-oss-120b instead of the
+    // default -20b) was fully implemented but had zero real callers
+    // anywhere — every task always got the fast/small "default" tier
+    // model, regardless of task category. Confirmed live via a real
+    // SWE-bench task: the small default model both (a) answered a genuine
+    // bug report conversationally from its own pretrained knowledge
+    // instead of investigating with its tools, giving a confidently wrong
+    // explanation, and (b) in a follow-up run, correctly found the right
+    // file but then returned a blank response with 0 completion tokens.
+    // "reasoning" (debug/plan) and "complex" (orchestrator) categories are
+    // exactly the investigative, multi-step work most exposed to that
+    // kind of failure — "code"/"simple" categories (mechanical edits once
+    // a plan or diagnosis already exists) don't need the same headroom.
+    const preferQuality = taskCategory === "reasoning" || taskCategory === "complex";
+    const routing = await router.route(taskCategory, undefined, { preferQuality });
+
+    // getDefaultConfig() sizes `maxTokens` (the context/history BUDGET —
+    // see AgentConfig's comment) from SystemAnalyzer's LOCAL machine load
+    // — as low as 8000 on this session's own "critical"-status dev
+    // machine — which is the right call for a local Ollama model, where
+    // local RAM/CPU genuinely constrains what can run, but is a category
+    // error for a cloud provider: a remote API's real context window
+    // (128K+ for Groq/OpenAI/OpenRouter/NVIDIA, higher still for Gemini)
+    // has nothing to do with this laptop's current memory pressure.
+    // Confirmed live on a real SWE-bench task: with a cloud provider
+    // serving the request, conversation history repeatedly exceeded
+    // 100%+ of that 8000-token ceiling despite active compaction —
+    // compaction's own 50%-of-maxTokens target (4000 tokens) leaves far
+    // too little room for a real tool-heavy investigative task's system
+    // prompt + tool schemas + search results. The real provider isn't
+    // known until routing resolves it here, so this can't be decided at
+    // construction time (getDefaultConfig() runs before any provider is
+    // chosen) — re-derive it now that it is known.
+    if (routing.provider.getType() !== "local") {
+      const { maxContextLength } = routing.provider.getCapabilities();
+      // Half the model's real context window, capped at a sane ceiling —
+      // generous headroom for tool-heavy conversations without sending
+      // needlessly huge payloads just because a model theoretically
+      // supports more (slower, and on some free tiers, more likely to
+      // trip a provider's own separate rate limit).
+      this.config.maxTokens = Math.min(Math.floor(maxContextLength * 0.5), 32000);
+    }
 
     const memory = getMemoryManager();
     const conversationId = memory.startConversation();
@@ -323,7 +409,12 @@ export abstract class BaseAgent {
       const streamStartTime = Date.now();
       const originalStream = provider.stream(truncatedMessages, {
         model,
-        maxTokens: this.config.maxTokens,
+        // outputMaxTokens (generation length), not maxTokens (the
+        // context/history budget) — see AgentConfig's comment. Falls
+        // back to maxTokens only if outputMaxTokens somehow isn't set
+        // (shouldn't happen — getDefaultConfig() always sets it — but a
+        // hand-built AgentConfig in a test or override could omit it).
+        maxTokens: this.config.outputMaxTokens ?? this.config.maxTokens,
         tools: toolsToSend.length > 0 ? toolsToSend : undefined,
       });
 
@@ -386,7 +477,7 @@ export abstract class BaseAgent {
     const startTime = Date.now();
     const result = await provider.complete(truncatedMessages, {
       model,
-      maxTokens: this.config.maxTokens,
+      maxTokens: this.config.outputMaxTokens ?? this.config.maxTokens,
       tools: toolsToSend.length > 0 ? toolsToSend : undefined,
     });
     const durationMs = Date.now() - startTime;
@@ -985,7 +1076,12 @@ export abstract class BaseAgent {
       },
     };
 
-    return { ...defaults[type], ...override };
+    // Sensible, fixed output-generation default (not derived from local
+    // system load, nor from a provider's context-window size — see
+    // AgentConfig.outputMaxTokens's comment). initializeContext() doesn't
+    // override this the way it overrides `maxTokens`; a single turn's
+    // response doesn't need to scale with the model's context window.
+    return { ...defaults[type], outputMaxTokens: 4096, ...override };
   }
 
   /**
@@ -1027,6 +1123,17 @@ export abstract class BaseAgent {
       name: string;
       params: Record<string, unknown>;
     }>;
+  }
+
+  /**
+   * True when `output` names a real tool inside a ```tool fence but
+   * parseToolCalls() still returned zero calls for it — i.e. the model
+   * tried to call a tool and the attempt was malformed/incomplete, not a
+   * genuine final answer. See tool-parser.ts's hasIncompleteToolCallAttempt
+   * for the real failure this distinguishes.
+   */
+  protected hasIncompleteToolCallAttempt(output: string): boolean {
+    return hasIncompleteToolCallAttempt(output, new Set(this.tools.keys()));
   }
 
   /**

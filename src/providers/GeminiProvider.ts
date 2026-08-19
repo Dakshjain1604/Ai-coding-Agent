@@ -162,6 +162,12 @@ export class GeminiProvider extends BaseProvider {
 
     this.logger.providerCall("gemini", model);
 
+    const geminiTools = options?.tools?.map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters as unknown as FunctionDeclarationSchema,
+    }));
+
     const genModel = this.genAI.getGenerativeModel({
       model,
       generationConfig: {
@@ -169,6 +175,10 @@ export class GeminiProvider extends BaseProvider {
         temperature: options?.temperature,
         topP: options?.topP,
       },
+      tools:
+        geminiTools && geminiTools.length > 0
+          ? [{ functionDeclarations: geminiTools }]
+          : undefined,
     });
 
     const { contents, systemInstruction } = this.convertMessages(messages);
@@ -178,14 +188,32 @@ export class GeminiProvider extends BaseProvider {
       systemInstruction,
     });
 
+    // Unlike OpenAI-compatible streaming, Gemini never splits a single
+    // function call's arguments across chunks — each chunk's
+    // functionCalls() (if any) is already fully-formed JSON, so no
+    // incremental accumulation is needed here, just collection.
+    const toolCalls: ToolCall[] = [];
     for await (const chunk of result.stream) {
       const text = chunk.text();
       if (text) {
         yield { content: text, done: false };
       }
+      const functionCalls = chunk.functionCalls?.();
+      if (functionCalls) {
+        for (const fc of functionCalls) {
+          toolCalls.push({
+            name: fc.name,
+            params: fc.args as Record<string, unknown>,
+          });
+        }
+      }
     }
 
-    yield { content: "", done: true };
+    yield {
+      content: "",
+      done: true,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    };
   }
 
   async embed(text: string): Promise<number[]> {

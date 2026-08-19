@@ -201,9 +201,23 @@ export class LocalProvider extends BaseProvider {
 
     try {
       if (this.provider === "ollama") {
+        const ollamaTools: OllamaTool[] | undefined = options?.tools?.map(
+          (t) => ({
+            type: "function",
+            function: {
+              name: t.name,
+              description: t.description,
+              parameters:
+                t.parameters as unknown as OllamaTool["function"]["parameters"],
+            },
+          }),
+        );
+
         const stream = await ollama.chat({
           model,
           messages: this.convertMessages(messages),
+          tools:
+            ollamaTools && ollamaTools.length > 0 ? ollamaTools : undefined,
           options: {
             num_predict: maxTokens,
             temperature: options?.temperature,
@@ -213,11 +227,33 @@ export class LocalProvider extends BaseProvider {
           stream: true,
         });
 
+        // Ollama doesn't split tool-call arguments across chunks the way
+        // the OpenAI streaming delta format does — each tool_calls entry
+        // arrives whole (arguments already a parsed object, same as
+        // complete() above), typically on the final chunk, so no
+        // incremental JSON accumulation is needed — just collection.
+        const toolCalls: ToolCall[] = [];
         for await (const chunk of stream) {
           if (chunk.message.content) {
             yield { content: chunk.message.content, done: false };
           }
+          const rawToolCalls = chunk.message.tool_calls;
+          if (Array.isArray(rawToolCalls)) {
+            for (const tc of rawToolCalls) {
+              toolCalls.push({
+                name: tc.function.name,
+                params: tc.function.arguments,
+              });
+            }
+          }
         }
+
+        yield {
+          content: "",
+          done: true,
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        };
+        return;
       } else {
         // LM Studio streaming
         const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {

@@ -23,7 +23,7 @@
  * never calls destroy()) and the getSpawnOptions() wiring (previously
  * computed but never actually passed to execute() anywhere).
  */
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import {
   AgentSpawner,
   createAgentSpawner,
@@ -443,6 +443,26 @@ describe("AgentSpawner — getSpawnOptions()", () => {
     expect(result.success).toBe(false);
     expect(result.output).toContain("timed out");
   });
+
+  // Regression, confirmed live on a real SWE-bench task: rejecting
+  // executeWithTimeout()'s own wrapper promise on timeout used to be the
+  // ONLY thing that happened — the underlying agent.execute() call kept
+  // running for as long as it wanted, fully unsupervised. Several more
+  // real tool calls (including one that overwrote a real source file with
+  // placeholder garbage) executed for minutes after the timeout failure
+  // had already been reported to the user. cancel() is the cooperative
+  // signal BaseAgent's main loop checks between iterations to actually
+  // stop continuing.
+  it("calls agent.cancel() when the execution timeout fires, not just rejecting its own wrapper promise", async () => {
+    const spawner = createAgentSpawner();
+    const spawned = await spawner.spawn("code", makeTask("do something"));
+    spawned.agent.execute = () => new Promise(() => {}); // never resolves
+    const cancelSpy = vi.spyOn(spawned.agent, "cancel");
+
+    await spawner.execute(spawned.id, spawner.getSpawnOptions({ timeout: 30 }));
+
+    expect(cancelSpy).toHaveBeenCalled();
+  });
 });
 
 describe("executeTask() — convenience function integration", () => {
@@ -555,6 +575,71 @@ describe("executeTask() — convenience function integration", () => {
     expect(result.output).toContain("[Subtask 2 PASSED");
   });
 
+  // Regression for a second live-reproduced bug found while fixing the one
+  // above: once the pipeline actually ran every stage, the 'plan' stage
+  // received the SAME raw imperative description as every other stage
+  // ("Create a file called hello.txt...") — a model given that verbatim,
+  // with a system prompt naming file_read/directory_create/search_files/
+  // search_content/workspace_verify/spawn_subagent as its ONLY tools (no
+  // file_write), reasonably tried to satisfy it directly anyway and
+  // attempted a tool call outside its own schema. Confirmed live against
+  // Groq's real API: the model emitted a hallucinated "tool_file_write"
+  // call, which Groq's grammar-constrained tool decoding hard-rejected
+  // with 400 "Parsing failed" / "Tool choice is none, but model called a
+  // tool" — a real request failure, not a benign no-op. Fixed by
+  // reframing the 'plan' stage's description (describeSubtask()) to make
+  // explicit that its job is to produce a plan, not execute one.
+  it("reframes the 'plan' stage's description as a planning request instead of the raw imperative task text", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Done.")]);
+    const task = makeTask(
+      "Create a file called hello.txt containing exactly the text: hello world",
+    );
+    await executeTask(task);
+
+    const firstCallMessages = env.provider.calls[0];
+    const userMessage = firstCallMessages.find((m) => m.role === "user");
+    expect(userMessage?.content).toContain("Produce a step-by-step");
+    expect(userMessage?.content).toContain(
+      "Create a file called hello.txt containing exactly the text: hello world",
+    );
+    // The raw imperative sentence must not appear as the ENTIRE message —
+    // only wrapped inside the planning framing.
+    expect(userMessage?.content).not.toMatch(
+      /^Create a file called hello\.txt/,
+    );
+  });
+
+  // Regression for a THIRD live-reproduced bug in the same pipeline path:
+  // executeTask()'s direct call to ParallelOrchestrator.executePipeline()
+  // used to pass a literal `[]` for parentToolNames. narrowChildTools()
+  // intersects a spawned stage's tools against that set — correct when a
+  // REAL parent agent exists (spawn_subagent's call, which passes the
+  // live parent's actual tool names), but this call site has no real
+  // parent at all (it's the root of execution). Intersecting against `[]`
+  // silently stripped EVERY tool from EVERY pipeline stage. Confirmed
+  // live: a 'code' stage with zero tools still had the model attempt a
+  // file_write call anyway (driven by the system prompt's "Available
+  // tools: ..." text), which Groq's real API hard-rejected with 400
+  // since there was no `tools` schema to validate the call against —
+  // every top-level multi-stage task failed this way, not an edge case.
+  it("does not strip tools from pipeline stages spawned directly by executeTask() (no real parent agent to narrow against)", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Done.")]);
+    const task = makeTask(
+      "Create a file called hello.txt containing exactly the text: hello world",
+    );
+    await executeTask(task);
+
+    // Every recorded call's tools must be non-empty — 'plan' mode alone
+    // has 6 tools (file_read, directory_create, search_files,
+    // search_content, workspace_verify, spawn_subagent); if narrowing had
+    // (incorrectly) applied here, every one of these would be `undefined`
+    // or an empty array instead.
+    expect(env.provider.callOptions.length).toBeGreaterThan(0);
+    for (const options of env.provider.callOptions) {
+      expect(options?.tools?.length ?? 0).toBeGreaterThan(0);
+    }
+  });
+
   it("a single-stage ('simple' complexity) task still runs directly through spawn(), not the pipeline path", async () => {
     env = setupFakeAgentEnv([scriptedResult("Done.")]);
     const result = await executeTask(makeTask("write a simple hello world function"));
@@ -573,5 +658,41 @@ describe("executeTask() — convenience function integration", () => {
     );
     expect(result.agentType).toBe("debug");
     expect(result.output).not.toContain("[Subtask");
+  });
+
+  // Regression coverage for a real SWE-bench task run: getSpawnOptions()'s
+  // timeout is purely system-load-derived (as low as 120s under
+  // "critical" status — a real, observed status on a memory-constrained
+  // dev machine) and has no awareness that 'debug'/'plan'/'orchestrator'
+  // agent types now route to a slower "quality" tier model by design (see
+  // BaseAgent.initializeContext()'s preferQuality wiring). Confirmed live:
+  // a real investigative task's LLM calls alone took ~4 minutes, comfortably
+  // inside a 5-minute budget but past the 120s one, and got cut off
+  // mid-investigation as a result.
+  it("gives a reasoning-category agent type (debug) at least a 5-minute timeout floor, regardless of system-load-derived defaults", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Diagnosed.")]);
+    const executeSpy = vi.spyOn(AgentSpawner.prototype, "execute");
+
+    await executeTask(makeTask("something is broken", { command: "debug" }));
+
+    expect(executeSpy).toHaveBeenCalled();
+    const [, spawnOptions] = executeSpy.mock.calls[0];
+    expect(spawnOptions?.timeout).toBeGreaterThanOrEqual(300000);
+    executeSpy.mockRestore();
+  });
+
+  it("does not inflate the timeout for a non-reasoning agent type (code)", async () => {
+    env = setupFakeAgentEnv([scriptedResult("Done.")]);
+    const executeSpy = vi.spyOn(AgentSpawner.prototype, "execute");
+
+    await executeTask(makeTask("write a function", { command: "simplify" }));
+
+    expect(executeSpy).toHaveBeenCalled();
+    const [, spawnOptions] = executeSpy.mock.calls[0];
+    // Not asserting an exact value (it's system-load-derived, either
+    // 120000 or 300000 depending on this machine's live status right
+    // now) — only that the reasoning-specific floor logic didn't apply.
+    expect([120000, 300000]).toContain(spawnOptions?.timeout);
+    executeSpy.mockRestore();
   });
 });

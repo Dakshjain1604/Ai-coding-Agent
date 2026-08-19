@@ -152,6 +152,28 @@ export class TaskAnalyzer {
   }
 
   /**
+   * Word-boundary-aware keyword check — `description.includes(word)` alone
+   * produces false positives against any identifier that happens to
+   * CONTAIN the trigger substring. Confirmed live against a real SWE-bench
+   * task: a genuine astropy bug report repeatedly referencing its
+   * `Linear1D` model class got scored "Line-level scope" — the LOWEST
+   * complexity tier, meant for one-line typo fixes — purely because
+   * "linear1d".includes("line") is true. None of this file's keyword
+   * lists are safe from this class of bug (e.g. "review" is a substring of
+   * "preview", "fix" of "prefix"/"suffix", "plan" of "explanation", "api"
+   * of "rapid"), so every keyword-matching site in this file goes through
+   * this helper rather than raw `.includes()`.
+   */
+  private hasWord(text: string, phrase: string): boolean {
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(text);
+  }
+
+  private hasAnyWord(text: string, phrases: string[]): boolean {
+    return phrases.some((p) => this.hasWord(text, p));
+  }
+
+  /**
    * Risk is scored independently from complexity/scope — they measure
    * different things. "Rename a UI label across 20 files" scores high on
    * complexity's scope/fileCount factors but is low-risk; "delete the
@@ -192,7 +214,7 @@ export class TaskAnalyzer {
     ];
 
     const countHits = (keywords: string[]) =>
-      keywords.filter((k) => description.includes(k)).length;
+      keywords.filter((k) => this.hasWord(description, k)).length;
 
     const destructiveHits = countHits(destructiveKeywords);
     const sensitiveHits = countHits(sensitiveKeywords);
@@ -259,19 +281,39 @@ export class TaskAnalyzer {
       };
     }
 
-    // Keywords that suggest specific agents
+    // Keywords that suggest specific agents. Even with word-boundary
+    // matching (hasWord/hasAnyWord, not raw .includes()), a trigger word
+    // still needs to be a genuinely SPECIFIC signal — "complex" is just
+    // common English ("if I make the model more complex..."), not an
+    // orchestration-specific term, and used to false-positive on any
+    // moderately technical task description, immediately routing it to
+    // 'orchestrator' (-> single unverified plan-mode agent, no file-write
+    // tools) via the early-return below regardless of the task's actual
+    // complexity score. Confirmed live: this exact word match, in a real
+    // SWE-bench bug report, was why that task got routed to plan mode.
+    // 'coordinate'/'orchestrate'/'multi-step' are specific enough to keep.
     const agentKeywords: Record<AgentType, string[]> = {
       plan: ['plan', 'analyze', 'design', 'architecture', 'research'],
       code: ['implement', 'create', 'build', 'write', 'add', 'fix', 'update'],
       test: ['test', 'verify', 'validate', 'coverage'],
-      debug: ['debug', 'fix bug', 'error', 'issue', 'problem', 'diagnose'],
+      // 'bug' (not just 'fix bug'/'debug') matters on its own — confirmed
+      // live: a real GitHub bug report said "this feels like a bug to me"
+      // and matched none of the other debug keywords, routing to 'code'
+      // mode's switch-statement default instead of 'debug' mode, which
+      // meant it never got debug's task category ("reasoning") and so
+      // never got the preferQuality model upgrade either (see
+      // BaseAgent.initializeContext()). Safe from the "debug"/"debugging"
+      // false-positive concern that motivated hasWord()'s word-boundary
+      // matching in the first place — "debug".match(/\bbug\b/) is false,
+      // since there's no boundary between "de" and "bug" in one word.
+      debug: ['debug', 'bug', 'fix bug', 'error', 'issue', 'problem', 'diagnose'],
       review: ['review', 'audit', 'check quality', 'analyze code'],
-      orchestrator: ['coordinate', 'orchestrate', 'multi-step', 'complex'],
+      orchestrator: ['coordinate', 'orchestrate', 'multi-step'],
     };
 
     // Check for single-agent tasks
     for (const [agent, keywords] of Object.entries(agentKeywords)) {
-      if (keywords.some((k) => description.includes(k))) {
+      if (this.hasAnyWord(description, keywords)) {
         if (complexity === 'simple') {
           return {
             mode: 'single',
@@ -293,7 +335,7 @@ export class TaskAnalyzer {
 
       case 'medium':
         // Pipeline: plan -> code -> test
-        if (description.includes('implement') || description.includes('create')) {
+        if (this.hasAnyWord(description, ['implement', 'create'])) {
           return {
             mode: 'pipeline',
             agents: ['plan', 'code', 'test'],
@@ -301,7 +343,7 @@ export class TaskAnalyzer {
           };
         }
         // Debug pipeline
-        if (description.includes('debug') || description.includes('fix')) {
+        if (this.hasAnyWord(description, ['debug', 'fix'])) {
           return {
             mode: 'pipeline',
             agents: ['debug', 'code'],
@@ -309,7 +351,7 @@ export class TaskAnalyzer {
           };
         }
         // Review pipeline
-        if (description.includes('review')) {
+        if (this.hasWord(description, 'review')) {
           return {
             mode: 'pipeline',
             agents: ['review', 'code'],
@@ -386,10 +428,12 @@ export class TaskAnalyzer {
       if (matches) count += matches.length;
     }
 
-    // Check for scope indicators
-    if (description.includes('project') || description.includes('entire')) {
+    // Check for scope indicators. "one" in particular is a common
+    // substring of ordinary words ("done", "gone", "someone", "phone") —
+    // word-boundary matching here isn't optional.
+    if (this.hasAnyWord(description, ['project', 'entire'])) {
       count = Math.max(count, 20);
-    } else if (description.includes('single') || description.includes('one')) {
+    } else if (this.hasAnyWord(description, ['single', 'one'])) {
       count = Math.max(count, 1);
     }
 
@@ -397,16 +441,16 @@ export class TaskAnalyzer {
   }
 
   private analyzeScope(description: string): { value: number; description: string } {
-    if (description.includes('project') || description.includes('entire') || description.includes('all')) {
+    if (this.hasAnyWord(description, ['project', 'entire', 'all'])) {
       return { value: 1, description: 'Project-wide scope' };
     }
-    if (description.includes('module') || description.includes('feature') || description.includes('component')) {
+    if (this.hasAnyWord(description, ['module', 'feature', 'component'])) {
       return { value: 0.6, description: 'Module-level scope' };
     }
-    if (description.includes('file') || description.includes('function') || description.includes('method')) {
+    if (this.hasAnyWord(description, ['file', 'function', 'method'])) {
       return { value: 0.3, description: 'File/function-level scope' };
     }
-    if (description.includes('line') || description.includes('fix typo') || description.includes('small')) {
+    if (this.hasAnyWord(description, ['line', 'fix typo', 'small'])) {
       return { value: 0.1, description: 'Line-level scope' };
     }
     // No scope signal found at all — bias toward "assume narrow" rather
@@ -428,13 +472,13 @@ export class TaskAnalyzer {
 
     let count = 0;
     for (const domain of domains) {
-      if (description.includes(domain)) count++;
+      if (this.hasWord(description, domain)) count++;
     }
 
     // Infer domains from context
-    if (description.includes('user') && !description.includes('database')) count++;
-    if (description.includes('database') || description.includes('query')) count++;
-    if (description.includes('deploy') || description.includes('build')) count++;
+    if (this.hasWord(description, 'user') && !this.hasWord(description, 'database')) count++;
+    if (this.hasAnyWord(description, ['database', 'query'])) count++;
+    if (this.hasAnyWord(description, ['deploy', 'build'])) count++;
 
     return Math.max(1, count);
   }
@@ -456,9 +500,29 @@ export class TaskAnalyzer {
     };
 
     for (const [keyword, value] of Object.entries(complexityKeywords)) {
-      if (description.includes(keyword)) {
+      if (this.hasWord(description, keyword)) {
         return { value, description: `${keyword} operation` };
       }
+    }
+
+    // No imperative keyword matched — before falling back to "assumed
+    // simple", check for a keyword-independent signal that this is real
+    // technical work anyway: code examples. Confirmed live: a genuine
+    // GitHub bug report ("X does not compute Y correctly... this feels
+    // like a bug to me, but I might be missing something?") contains ZERO
+    // imperative verbs — real bug reports are observations, not commands —
+    // but typically includes runnable code demonstrating the problem. That
+    // combination (no command verb, real code present) is a strong signal
+    // of investigative work, not evidence of triviality the way a
+    // genuinely keyword-and-code-free task like "say hello" is.
+    const fencedBlocks = (description.match(/```/g) || []).length / 2;
+    const inlineCodeSpans = (description.match(/`[^`\n]+`/g) || []).length;
+    if (fencedBlocks >= 1 || inlineCodeSpans >= 3) {
+      return {
+        value: 0.5,
+        description:
+          'No complexity keyword found, but contains code examples (treated as real investigative work)',
+      };
     }
 
     // Same reasoning as analyzeScope's default: no complexity keyword
@@ -468,10 +532,10 @@ export class TaskAnalyzer {
   }
 
   private analyzeTesting(description: string): { value: number; description: string } {
-    if (description.includes('test') || description.includes('verify')) {
+    if (this.hasAnyWord(description, ['test', 'verify'])) {
       return { value: 0.7, description: 'Testing required' };
     }
-    if (description.includes('coverage') || description.includes('unit test')) {
+    if (this.hasAnyWord(description, ['coverage', 'unit test'])) {
       return { value: 0.9, description: 'Comprehensive testing required' };
     }
     return { value: 0.2, description: 'Basic testing' };
@@ -481,11 +545,11 @@ export class TaskAnalyzer {
     let count = 1;
 
     // Check for dependency keywords
-    if (description.includes('depends on') || description.includes('requires')) count += 2;
-    if (description.includes('integration') || description.includes('connect')) count += 2;
-    if (description.includes('api') || description.includes('service')) count += 1;
-    if (description.includes('database') || description.includes('storage')) count += 1;
-    if (description.includes('external') || description.includes('third-party')) count += 2;
+    if (this.hasAnyWord(description, ['depends on', 'requires'])) count += 2;
+    if (this.hasAnyWord(description, ['integration', 'connect'])) count += 2;
+    if (this.hasAnyWord(description, ['api', 'service'])) count += 1;
+    if (this.hasAnyWord(description, ['database', 'storage'])) count += 1;
+    if (this.hasAnyWord(description, ['external', 'third-party'])) count += 2;
 
     return count;
   }
@@ -493,16 +557,16 @@ export class TaskAnalyzer {
   private identifyParallelAgents(description: string): AgentType[] {
     const agents: AgentType[] = [];
 
-    if (description.includes('frontend') || description.includes('ui')) {
+    if (this.hasAnyWord(description, ['frontend', 'ui'])) {
       agents.push('code');
     }
-    if (description.includes('backend') || description.includes('api')) {
+    if (this.hasAnyWord(description, ['backend', 'api'])) {
       agents.push('code');
     }
-    if (description.includes('database') || description.includes('data')) {
+    if (this.hasAnyWord(description, ['database', 'data'])) {
       agents.push('code');
     }
-    if (description.includes('test') || description.includes('verify')) {
+    if (this.hasAnyWord(description, ['test', 'verify'])) {
       agents.push('test');
     }
 

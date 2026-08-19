@@ -34,6 +34,7 @@ export const spawnSubagentTool: ToolDefinition = {
       description:
         'Ordered list of subtasks to run in sequence, stopping at the first failure. Each item: { "mode": "code"|"debug"|"test"|"review"|"plan", "description": "..." }',
       required: true,
+      items: { type: "object" },
     },
   },
   handler: async (params: Record<string, unknown>): Promise<ToolResult> => {

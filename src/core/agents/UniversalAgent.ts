@@ -29,7 +29,7 @@ marked.setOptions({
 });
 import { SYSTEM_PROMPTS, isValidAgentMode, type AgentMode } from "./system-prompts.js";
 import { TOOL_SETS } from "./tool-sets.js";
-import type { Task, TaskResult } from "../../utils/types.js";
+import type { Task, TaskResult, ProviderType } from "../../utils/types.js";
 import { getToolRegistry } from "../tools/ToolRegistry.js";
 import { ensureBuiltinToolsRegistered } from "../tools/builtin.js";
 import { getConfigManager } from "../../utils/config.js";
@@ -217,6 +217,18 @@ export class UniversalAgent extends BaseAgent {
         // instructions) and reuse it verbatim for every LLM call in this
         // task — never rebuilt mid-task, so it stays eligible for the
         // provider's prompt cache (see ClaudeProvider's cache_control).
+        //
+        // Deliberately NOT branched on context.provider.getCapabilities()
+        // .functionCalling here: attemptDynamicFallback() can swap the
+        // active provider mid-task (confirmed live — a Groq failure
+        // fell back to a different provider on a later retry), but this
+        // prompt is built once and reused for the rest of the task. A
+        // capability check at build time could bake in a decision for a
+        // provider that's no longer the one actually serving the request
+        // by the next call. TOOL_FORMAT_INSTRUCTION's wording (see
+        // system-prompts.ts) is written to be safe to include
+        // unconditionally — it defers to native tool-calling when the
+        // provider offers it rather than contradicting it.
         const epoch: ContextEpoch = await createContextEpoch(
           buildTaskSystemPrompt(this.currentMode, task),
           process.cwd(),
@@ -247,9 +259,35 @@ export class UniversalAgent extends BaseAgent {
         let lastToolCallsString = "";
         const EARLY_EXIT_THRESHOLD = 3;
         const ACTION_CYCLE_LIMIT = 3;
+        // A response with no tool calls AND no text is not a legitimate
+        // "I'm done" signal — it's the model producing nothing (confirmed
+        // live: Groq's gpt-oss-20b returned 0 completion tokens on a debug
+        // turn right after a real tool result, and the loop used to treat
+        // that identically to a genuine final answer, silently returning
+        // success:true with blank output). Nudge and retry a bounded
+        // number of times before giving up honestly instead of masking it.
+        // Also shared with the (separate) "named a real tool but its JSON
+        // didn't parse" retry path below — both are "the model tried and
+        // failed to make progress" cases. Reset to 0 on every turn that
+        // DOES make real progress (a parsed tool call), so this counts
+        // truly CONSECUTIVE failures, not a lifetime total across the
+        // whole task — see the reset site's comment for why that
+        // distinction is load-bearing, not cosmetic.
+        let blankResponseRetries = 0;
+        const MAX_BLANK_RESPONSE_RETRIES = 2;
         const streamingEnabled = getConfigManager().get().defaults.streaming;
 
         while (iterations < maxIterations) {
+          // See BaseAgent.cancel()'s comment — set once AgentSpawner's
+          // execution timeout fires. Checked here, at the top of each
+          // iteration, rather than mid-call: this stops the loop from
+          // starting further LLM calls/tool executions once the caller
+          // has already given up and moved on, without needing a full
+          // AbortController threaded into every provider's network call.
+          if (this.cancelled) {
+            break;
+          }
+
           const iterationNum = iterations + 1;
 
           const llmSpinner = ora({
@@ -262,7 +300,17 @@ export class UniversalAgent extends BaseAgent {
           let compResult: CompletionResult | null = null;
           let retries = 0;
           const maxRetries = 3;
-          let hasFallenBack = false;
+          // Accumulates every provider tried (and exhausted) THIS
+          // iteration, so a fallback provider that itself then fails can
+          // trigger a FURTHER fallback to a third provider instead of
+          // giving up — confirmed live: groq exhausted its daily quota,
+          // fell back to openrouter, openrouter ALSO hit its own daily
+          // free-tier cap, and the task failed outright even though a
+          // third configured provider (NVIDIA, a separate account/quota
+          // entirely) was never even attempted. The old `hasFallenBack`
+          // boolean only ever allowed ONE switch per iteration regardless
+          // of how many providers were actually configured.
+          const excludedProviders = new Set<ProviderType>();
 
           while (retries < maxRetries) {
             try {
@@ -274,6 +322,7 @@ export class UniversalAgent extends BaseAgent {
 
                 let collected = "";
                 let firstChunk = true;
+                let streamedToolCalls: CompletionResult["toolCalls"];
                 for await (const chunk of streamIter) {
                   if (firstChunk && chunk.content) {
                     llmSpinner.stop();
@@ -282,6 +331,9 @@ export class UniversalAgent extends BaseAgent {
                   if (chunk.content) {
                     process.stdout.write(chunk.content);
                     collected += chunk.content;
+                  }
+                  if (chunk.toolCalls && chunk.toolCalls.length > 0) {
+                    streamedToolCalls = chunk.toolCalls;
                   }
                 }
                 if (!firstChunk) {
@@ -299,7 +351,8 @@ export class UniversalAgent extends BaseAgent {
                     outputTokens: estTokens,
                   },
                   model: context.model,
-                  finishReason: "stop",
+                  finishReason: streamedToolCalls ? "tool_calls" : "stop",
+                  toolCalls: streamedToolCalls,
                 };
               } else {
                 const result = await this.callLLM({
@@ -327,17 +380,16 @@ export class UniversalAgent extends BaseAgent {
               // shouldChangeStrategy — a bug in our own request-building
               // code fails identically on any provider, so no fallback
               // attempt should be wasted on it either.
-              const worthTryingFallback =
-                (classified.shouldChangeStrategy || exhausted) && !hasFallenBack;
+              const worthTryingFallback = classified.shouldChangeStrategy || exhausted;
 
               if (worthTryingFallback) {
-                hasFallenBack = true;
+                excludedProviders.add(context.provider.getType());
                 console.log(
                   chalk.yellow(
                     `\n${nonRetryable ? `Non-retryable error (${classified.category})` : "All retries failed"} for ${context.provider.getType()}. Attempting dynamic fallback...`,
                   ),
                 );
-                if (await this.attemptDynamicFallback(context)) {
+                if (await this.attemptDynamicFallback(context, excludedProviders)) {
                   retries = 0;
                   continue;
                 }
@@ -428,6 +480,72 @@ export class UniversalAgent extends BaseAgent {
 
           toolCalls += toolCallsInOutput.length;
 
+          // Must be checked BEFORE consecutiveIdle's own early-exit below —
+          // a run of blank turns also increments consecutiveIdle (it has
+          // no tool calls either), and that threshold (3) is lower than
+          // nothing stops it from firing first and silently returning
+          // success:true via the SAME masking bug this block exists to
+          // fix, just via a different path. A blank response must never
+          // be treated as a legitimate "no more actions needed" signal.
+          const isBlankResponse =
+            toolCallsInOutput.length === 0 && content.trim().length === 0;
+
+          if (isBlankResponse) {
+            blankResponseRetries++;
+            if (blankResponseRetries > MAX_BLANK_RESPONSE_RETRIES) {
+              throw new Error(
+                `Model produced ${blankResponseRetries} consecutive empty responses ` +
+                  `(no text, no tool calls) — unable to complete the task.`,
+              );
+            }
+            console.log(
+              chalk.yellow(
+                `\nEmpty response received (no text, no tool calls). Nudging the model to continue (attempt ${blankResponseRetries}/${MAX_BLANK_RESPONSE_RETRIES})...\n`,
+              ),
+            );
+            // Don't record the blank turn as a real assistant message —
+            // it carries no information — just prompt for a real one.
+            this.addMessage(
+              "system",
+              "Your previous response was empty. Provide either a tool call for your next action, or — if you are finished — a complete final answer summarizing what you found and did.",
+            );
+            iterations++;
+            continue;
+          }
+
+          // A response naming a real tool inside a ```tool fence, but that
+          // parseToolCalls() couldn't turn into a call (malformed or
+          // truncated-mid-generation JSON — confirmed live: a free-tier
+          // model's response cut off mid-string with no closing brace) is
+          // an in-progress attempt, not a final answer. Treating it as
+          // "no more actions needed" (the very next check below) would
+          // silently discard a correctly-aimed fix instead of retrying it.
+          const isIncompleteToolAttempt =
+            toolCallsInOutput.length === 0 &&
+            !isBlankResponse &&
+            this.hasIncompleteToolCallAttempt(content);
+
+          if (isIncompleteToolAttempt) {
+            blankResponseRetries++;
+            if (blankResponseRetries > MAX_BLANK_RESPONSE_RETRIES) {
+              throw new Error(
+                `Model attempted ${blankResponseRetries} tool calls that could not be parsed ` +
+                  `(malformed or incomplete JSON) — unable to complete the task.`,
+              );
+            }
+            console.log(
+              chalk.yellow(
+                `\nTool call attempt could not be parsed (malformed/incomplete JSON). Nudging the model to retry (attempt ${blankResponseRetries}/${MAX_BLANK_RESPONSE_RETRIES})...\n`,
+              ),
+            );
+            this.addMessage(
+              "system",
+              "Your previous response attempted a tool call, but its JSON body was malformed or incomplete (e.g. cut off mid-string, missing a closing brace). Please retry with a single, complete, valid tool call.",
+            );
+            iterations++;
+            continue;
+          }
+
           if (toolCallsInOutput.length === 0) {
             consecutiveIdle++;
             if (consecutiveIdle >= EARLY_EXIT_THRESHOLD) {
@@ -438,6 +556,18 @@ export class UniversalAgent extends BaseAgent {
             }
           } else {
             consecutiveIdle = 0;
+            // A real, parsed tool call is unambiguous forward progress —
+            // reset the shared blank/incomplete-attempt retry budget so a
+            // single flaky turn earlier in a long task (confirmed live: a
+            // free-tier model going blank once, then successfully calling
+            // file_read, then going blank twice more) doesn't silently
+            // consume retries meant to bound truly CONSECUTIVE failures.
+            // Without this, blankResponseRetries only ever counts UP for
+            // the whole task, so the eventual error message's own claim of
+            // "N consecutive empty responses" is false whenever a
+            // successful turn happened in between — this reset is what
+            // makes that claim actually true.
+            blankResponseRetries = 0;
           }
 
           if (toolCallsInOutput.length === 0 && iterations > 0) {
@@ -569,7 +699,10 @@ export class UniversalAgent extends BaseAgent {
    * was available (e.g. only one API key configured) — the caller decides
    * what to do next (retry fresh vs. give up) based on that.
    */
-  private async attemptDynamicFallback(context: AgentContext): Promise<boolean> {
+  private async attemptDynamicFallback(
+    context: AgentContext,
+    excludedProviders: Set<ProviderType>,
+  ): Promise<boolean> {
     try {
       // Reuse the shared, already-configured router singleton (set up in
       // BaseAgent.initializeContext()) rather than a bare `new
@@ -577,11 +710,21 @@ export class UniversalAgent extends BaseAgent {
       // preferLocal/fallbackToPaid config.
       const router = getModelRouter();
       const tokens = this.estimateTokenCount(context.messages);
-      // Exclude the provider that just failed — isAvailable() caches its
-      // result for the process lifetime, so without this, route() would
-      // just re-select the same provider that just failed.
+      // Exclude every provider tried (and exhausted) so far THIS
+      // iteration, not just the one that just failed — isAvailable()
+      // caches its result for the process lifetime, so without the full
+      // accumulated set, route() could hand back a provider already known
+      // to be exhausted (e.g. switching openrouter -> groq -> openrouter
+      // again in a pointless circle) instead of reaching a third,
+      // untried, genuinely viable provider.
+      const taskCategory = this.getTaskCategory();
       const routing = await router.route(this.getTaskCategory(), tokens, {
-        exclude: [context.provider.getType()],
+        exclude: [...excludedProviders],
+        // Keep the same quality preference as the initial routing decision
+        // (see BaseAgent.initializeContext()) — a fallback mid-task
+        // shouldn't silently downgrade a reasoning/complex task back to
+        // the fast/small default-tier model.
+        preferQuality: taskCategory === "reasoning" || taskCategory === "complex",
       });
       context.provider = routing.provider;
       context.model = routing.model;

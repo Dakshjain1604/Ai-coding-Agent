@@ -13,6 +13,7 @@ import {
 } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";
 import { getLogger } from "../utils/logger.js";
+import { accumulateOpenAIToolCallDeltas } from "./openai-stream-tools.js";
 
 export interface OpenAIConfig {
   apiKey?: string;
@@ -22,9 +23,25 @@ export interface OpenAIConfig {
   [key: string]: unknown;
 }
 
+/**
+ * NVIDIA's OpenAI-compatible catalog (integrate.api.nvidia.com) rotates
+ * models — every model ID it returns from GET /v1/models comes back with a
+ * `deprecation` response header pointing at a real, near-term date (e.g.
+ * confirmed live: "z-ai/glm-5.2" carries "deprecation: 2026-08-25...").
+ * Treat this list as illustrative, not permanent, same caveat as
+ * OpenRouter's paid-model catalog in OpenRouterProvider.ts.
+ */
+const NVIDIA_MODELS = [
+  "z-ai/glm-5.2",
+  "meta/llama-3.1-70b-instruct",
+  "meta/llama-3.1-8b-instruct",
+  "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+];
+
 export class OpenAIProvider extends BaseProvider {
   private client: OpenAI;
   private defaultModel: string;
+  private isNvidia: boolean;
   private logger = getLogger();
 
   constructor(config?: OpenAIConfig) {
@@ -34,6 +51,7 @@ export class OpenAIProvider extends BaseProvider {
       !config?.apiKey &&
       !process.env.OPENAI_API_KEY &&
       (Boolean(process.env.NVIDIA_API_KEY) || Boolean(process.env.NVAPI_KEY));
+    this.isNvidia = isNvidia;
 
     const apiKey =
       config?.apiKey ??
@@ -57,9 +75,14 @@ export class OpenAIProvider extends BaseProvider {
       organization: config?.organization,
     });
 
+    // The previous default, "meta/llama-3.3-70b-instruct", is confirmed
+    // live to hang indefinitely on this platform (100s+ with no response
+    // at all) — it was never actually exercised against the real API.
+    // "z-ai/glm-5.2" is confirmed live: responds in ~3.5s and returns
+    // correct native tool_calls against this codebase's real 20-tool
+    // schema set.
     this.defaultModel =
-      config?.defaultModel ??
-      (isNvidia ? "meta/llama-3.3-70b-instruct" : "gpt-4o");
+      config?.defaultModel ?? (isNvidia ? "z-ai/glm-5.2" : "gpt-4o");
   }
 
   async isAvailable(): Promise<boolean> {
@@ -73,6 +96,20 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   getCapabilities(): ProviderCapabilities {
+    if (this.isNvidia) {
+      return {
+        streaming: true,
+        // NVIDIA's catalog has dedicated embedding models
+        // (nvidia/nv-embed-v1 etc.) but this client isn't pointed at that
+        // endpoint shape — same "not actually supported through this
+        // client" situation as OpenRouter's embed().
+        embeddings: false,
+        functionCalling: true,
+        vision: false,
+        maxContextLength: 128000,
+        supportedModels: NVIDIA_MODELS,
+      };
+    }
     return {
       streaming: true,
       embeddings: true,
@@ -101,15 +138,20 @@ export class OpenAIProvider extends BaseProvider {
     this.logger.providerCall("openai", model);
 
     try {
-      const isNvidia = this.client.baseURL.includes("nvidia");
-      const openAiTools = !isNvidia ? options?.tools?.map((t) => ({
+      // Previously skipped entirely for NVIDIA (`!isNvidia ? ... :
+      // undefined`) on the assumption its endpoint doesn't support native
+      // tool calling — confirmed live that assumption was simply wrong:
+      // NVIDIA's OpenAI-compatible endpoint returns correct, well-formed
+      // tool_calls for both "z-ai/glm-5.2" and "meta/llama-3.1-70b-
+      // instruct" against this codebase's real 20-tool schema set.
+      const openAiTools = options?.tools?.map((t) => ({
         type: "function" as const,
         function: {
           name: t.name,
           description: t.description,
           parameters: t.parameters,
         },
-      })) : undefined;
+      }));
 
       const response = await this.client.chat.completions.create({
         model,
@@ -169,6 +211,17 @@ export class OpenAIProvider extends BaseProvider {
 
     this.logger.providerCall("openai", model);
 
+    // See complete()'s comment — forwarding tools to NVIDIA is correct,
+    // confirmed live.
+    const openAiTools = options?.tools?.map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters,
+      },
+    }));
+
     const stream = await this.client.chat.completions.create({
       model,
       max_tokens: maxTokens,
@@ -177,19 +230,35 @@ export class OpenAIProvider extends BaseProvider {
       top_p: options?.topP,
       stop: options?.stopSequences,
       stream: true,
+      tools: openAiTools && openAiTools.length > 0 ? openAiTools : undefined,
     });
 
+    const toolCalls = accumulateOpenAIToolCallDeltas();
+
     for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content;
-      if (content) {
-        yield { content, done: false };
+      const delta = chunk.choices[0]?.delta;
+      if (delta?.content) {
+        yield { content: delta.content, done: false };
+      }
+      if (delta?.tool_calls) {
+        toolCalls.absorb(delta.tool_calls);
       }
     }
 
-    yield { content: "", done: true };
+    yield { content: "", done: true, toolCalls: toolCalls.finalize() };
   }
 
   async embed(text: string): Promise<number[]> {
+    if (this.isNvidia) {
+      // "text-embedding-3-small" is an OpenAI-only model id — calling it
+      // against NVIDIA's endpoint would fail with a confusing raw
+      // "model not found"-style error rather than an honest one.
+      throw new ProviderError(
+        "Embeddings not supported through this NVIDIA client",
+        "openai",
+        { hint: "NVIDIA's dedicated embedding models (e.g. nvidia/nv-embed-v1) need a different request shape than this client sends." },
+      );
+    }
     try {
       const response = await this.client.embeddings.create({
         model: "text-embedding-3-small",
@@ -218,6 +287,16 @@ export class OpenAIProvider extends BaseProvider {
   async getDefaultModel(
     taskType: "simple" | "code" | "complex",
   ): Promise<string> {
+    if (this.isNvidia) {
+      // The previous OpenAI-only model IDs here (gpt-4o-mini/gpt-4o/
+      // o1-preview) aren't valid against NVIDIA's endpoint at all.
+      const nvidiaModelMap: Record<string, string> = {
+        simple: "meta/llama-3.1-8b-instruct",
+        code: "z-ai/glm-5.2",
+        complex: "meta/llama-3.1-70b-instruct",
+      };
+      return nvidiaModelMap[taskType] ?? this.defaultModel;
+    }
     const modelMap: Record<string, string> = {
       simple: "gpt-4o-mini",
       code: "gpt-4o",
@@ -231,6 +310,14 @@ export class OpenAIProvider extends BaseProvider {
     outputTokens: number,
     model: string,
   ): number {
+    // NVIDIA's API catalog access (this codebase only ever reaches it via
+    // the free evaluation tier) is free — the OpenAI pricing table below
+    // would otherwise silently apply GPT-4o's real paid per-token rates
+    // to genuinely free NVIDIA usage, since none of NVIDIA's model IDs
+    // are in that table and the fallback (`pricing["gpt-4o"]`) is a real
+    // priced entry, not zero.
+    if (this.isNvidia) return 0;
+
     // Pricing per million tokens (as of 2024)
     const pricing: Record<string, { input: number; output: number }> = {
       "gpt-4o": { input: 2.5, output: 10 },

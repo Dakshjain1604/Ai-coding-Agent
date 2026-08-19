@@ -29,6 +29,7 @@ export function createCodeSearchTools(): ToolDefinition[] {
           type: "array",
           description: "Patterns to exclude",
           required: false,
+          items: { type: "string" },
         },
       },
       handler: async (params: Record<string, unknown>): Promise<ToolResult> => {
@@ -337,11 +338,13 @@ export function createCodeSearchTools(): ToolDefinition[] {
           type: "array",
           description: "File extensions to include",
           required: false,
+          items: { type: "string" },
         },
         exclude: {
           type: "array",
           description: "Patterns to exclude",
           required: false,
+          items: { type: "string" },
         },
       },
       handler: async (params: Record<string, unknown>): Promise<ToolResult> => {

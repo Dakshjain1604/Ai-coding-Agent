@@ -21,6 +21,16 @@ export interface ToolParameter {
   required: boolean;
   default?: unknown;
   enum?: string[];
+  /**
+   * Required by JSON Schema for `type: "array"` (and enforced strictly by
+   * some function-calling backends — confirmed live via OpenRouter routed
+   * to Google AI Studio: "GenerateContentRequest.tools[...].parameters.
+   * properties[x].items: missing field" — a real 400 on every tool with an
+   * array param and no `items`). Groq/OpenAI's validators are laxer and
+   * silently accepted the same schema, which is exactly why this went
+   * unnoticed until a stricter backend was tested against.
+   */
+  items?: { type: "string" | "number" | "boolean" | "object" };
 }
 
 /**

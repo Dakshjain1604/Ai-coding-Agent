@@ -17,11 +17,13 @@
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { UniversalAgent } from "../../src/core/agents/UniversalAgent.js";
+import { ProviderFactory } from "../../src/providers/ProviderFactory.js";
 import type { Task } from "../../src/utils/types.js";
 import {
   setupFakeAgentEnv,
   scriptedResult,
   scriptedError,
+  FakeProvider,
   type FakeAgentEnv,
 } from "../helpers/agent-test-harness.js";
 
@@ -274,6 +276,61 @@ describe("Retry loop — fallback provider actually stays adopted for subsequent
     expect(result.success).toBe(true);
     expect(result.output).toContain("Recovered again");
   }, 10000);
+
+  it("chains through a THIRD provider within the SAME iteration if the first fallback also fails", async () => {
+    // Reproduces a real live failure verbatim: groq exhausted its daily
+    // free-tier quota, fell back to openrouter, and openrouter ALSO hit
+    // its own separate daily free-tier cap within the same LLM-call
+    // iteration — the task failed outright even though a third configured
+    // provider (a separate account/quota entirely) was never attempted.
+    // Root cause: the old `hasFallenBack` boolean only allowed ONE
+    // provider switch per iteration, no matter how many providers were
+    // actually configured. The fix tracks an accumulating excluded-
+    // providers set instead, so a second fallback failure within the same
+    // iteration can still reach a third, untried provider.
+    env = setupFakeAgentEnv(
+      [scriptedError("429 rate limit — local exhausted")],
+      [scriptedError("429 rate limit — groq exhausted too")],
+    );
+
+    // A third provider, manually seeded under its own distinct
+    // ProviderType — the harness's setupFakeAgentEnv only wires up two
+    // (local + one fallback), so the third is added directly the same
+    // way other tests in this suite reach into ProviderFactory's
+    // internals to adjust routing state.
+    const thirdProvider = new FakeProvider(
+      [scriptedResult("Recovered via the THIRD provider.")],
+      "openrouter",
+    );
+    (
+      ProviderFactory.getInstance() as unknown as {
+        providers: Map<string, unknown>;
+        availability: Map<string, boolean>;
+      }
+    ).providers.set("openrouter", thirdProvider);
+    (
+      ProviderFactory.getInstance() as unknown as {
+        availability: Map<string, boolean>;
+      }
+    ).availability.set("openrouter", true);
+
+    const agent = new UniversalAgent("code");
+    const result = await agent.execute(makeTask("say hello"));
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("THIRD provider");
+    // At least one successful call on the third provider — that's the
+    // whole point of this test. (A genuine final answer with zero tool
+    // calls on the very first iteration doesn't early-exit the loop —
+    // see UniversalAgent's `iterations > 0` check — so it may legitimately
+    // be called a second time too; FakeProvider repeats its last scripted
+    // entry, which is this same successful response either way.)
+    expect(thirdProvider.calls.length).toBeGreaterThanOrEqual(1);
+    // Both local and groq must fully exhaust their own bounded backoff
+    // (~6s each: 2s + 4s across 3 attempts, same cost as the single-
+    // provider-exhaustion case elsewhere in this file) before the third
+    // fallback is even attempted.
+  }, 20000);
 });
 
 describe("Retry loop — debug logging surfaces the classification", () => {

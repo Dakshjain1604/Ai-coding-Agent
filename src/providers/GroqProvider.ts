@@ -13,11 +13,31 @@ import {
 } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";
 import { getLogger } from "../utils/logger.js";
+import { accumulateOpenAIToolCallDeltas } from "./openai-stream-tools.js";
 
 export interface GroqConfig {
   apiKey?: string;
   defaultModel?: string;
   [key: string]: unknown;
+}
+
+/**
+ * Groq's free tier enforces an 8000 TPM (tokens per minute) ceiling per
+ * model that — per live testing — counts the reserved `max_tokens` output
+ * budget together with the input prompt against the SAME 8000 total, not
+ * as separate input/output budgets. Callers upstream (BaseAgent) size
+ * `maxTokens` from SystemAnalyzer's LOCAL machine capacity (up to 64000 on
+ * an "optimal" machine), which has nothing to do with Groq's own
+ * account-level quota — a request built from that local sizing alone can
+ * reserve the model's entire per-minute budget before a single input
+ * token is counted, failing with 413 "Request too large" even for a
+ * trivially small prompt. Clamp here, not in SystemAnalyzer, since this
+ * ceiling is a fact about Groq specifically, not about local resources.
+ */
+const FREE_TIER_MAX_OUTPUT_TOKENS = 2048;
+
+function clampMaxTokens(requested?: number): number {
+  return Math.min(requested ?? 4096, FREE_TIER_MAX_OUTPUT_TOKENS);
 }
 
 export class GroqProvider extends BaseProvider {
@@ -97,9 +117,17 @@ export class GroqProvider extends BaseProvider {
         model,
         messages: this.convertMessages(messages),
         temperature: options?.temperature,
-        max_tokens: options?.maxTokens ?? 4096,
+        max_tokens: clampMaxTokens(options?.maxTokens),
         stream: false,
         tools: groqTools && groqTools.length > 0 ? groqTools : undefined,
+        // Explicit "auto" rather than leaving tool_choice unset — Groq's
+        // reasoning ("harmony"-format) models are documented to sometimes
+        // mishandle an implicit default, occasionally producing a tool
+        // call the server itself then rejects with "Tool choice is none,
+        // but model called a tool" (confirmed live during real-task
+        // testing). Only relevant when tools are actually being offered.
+        tool_choice:
+          groqTools && groqTools.length > 0 ? "auto" : undefined,
       });
 
       const choice = response.choices[0];
@@ -150,13 +178,28 @@ export class GroqProvider extends BaseProvider {
     const model = options?.model ?? this.defaultModel;
 
     try {
+      const groqTools = options?.tools?.map((t) => ({
+        type: "function" as const,
+        function: {
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        },
+      }));
+
       const response = await this.client.chat.completions.create({
         model,
         messages: this.convertMessages(messages),
         temperature: options?.temperature,
-        max_tokens: options?.maxTokens ?? 4096,
+        max_tokens: clampMaxTokens(options?.maxTokens),
         stream: true,
+        tools: groqTools && groqTools.length > 0 ? groqTools : undefined,
+        // See the same field in complete() above for why this is explicit.
+        tool_choice:
+          groqTools && groqTools.length > 0 ? "auto" : undefined,
       });
+
+      const toolCalls = accumulateOpenAIToolCallDeltas();
 
       for await (const chunk of response) {
         const delta = chunk.choices[0]?.delta;
@@ -166,7 +209,12 @@ export class GroqProvider extends BaseProvider {
             done: false,
           };
         }
+        if (delta?.tool_calls) {
+          toolCalls.absorb(delta.tool_calls);
+        }
       }
+
+      yield { content: "", done: true, toolCalls: toolCalls.finalize() };
     } catch (error) {
       throw new ProviderError(
         `Groq streaming error: ${error instanceof Error ? error.message : "Unknown error"}`,

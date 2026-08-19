@@ -9,7 +9,7 @@ import { ProviderFactory } from "./ProviderFactory.js";
 import { BaseProvider } from "./ProviderInterface.js";
 import { ProviderError } from "../utils/types.js";
 import chalk from "chalk";
-import { getModelFor } from "./ProviderRegistry.js";
+import { getModelFor, useNvidiaFallback } from "./ProviderRegistry.js";
 import { getModelCatalog } from "./ModelCatalog.js";
 
 export type { TaskCategory } from "./ProviderRegistry.js";
@@ -47,31 +47,44 @@ const PAID_PROVIDER_TYPES: ReadonlySet<ProviderType> = new Set([
 
 /**
  * Default routing rules when local-first is disabled.
- * Priority: OpenRouter (stepfun free model) -> Groq -> paid fallbacks.
- * When `preferLocal` is true, ModelRouter builds a local-first variant of
- * these rules instead (see `buildDefaultRules`) — this table is only used
- * as the non-local-first branch.
+ * Priority: Groq (openai/gpt-oss-20b — fast inference, but an 8000 TPM
+ * free-tier ceiling per GroqProvider's own clamping) -> OpenRouter
+ * (openai/gpt-oss-20b:free, tried across 3 confirmed-working free models
+ * via its own `models` fallback array when one is rate-limited — see
+ * OpenRouterProvider.OPENROUTER_FREE_TOOL_MODELS) -> paid fallbacks.
+ * Groq is deliberately tried first for latency (confirmed live: Groq's
+ * free-tier responses are noticeably faster than OpenRouter's, which adds
+ * routing overhead to third-party model hosts); OpenRouter is the
+ * rate-limit safety net once Groq's small per-minute budget is exhausted,
+ * not the primary path. `routeToFallback`'s hardcoded order already
+ * agreed with this (local -> groq -> openrouter -> ...) — this table
+ * previously didn't, sending every default-rule request to OpenRouter
+ * first regardless, and only reaching routeToFallback's groq-first order
+ * when OpenRouter was entirely unconfigured. When `preferLocal` is true,
+ * ModelRouter builds a local-first variant of these rules instead (see
+ * `buildDefaultRules`) — this table is only used as the non-local-first
+ * branch.
  */
 const CLOUD_FIRST_RULES: RoutingRule[] = [
   {
     taskCategory: "simple",
-    provider: "openrouter",
-    model: "stepfun/step-3.5-flash:free",
+    provider: "groq",
+    model: "openai/gpt-oss-20b",
   },
   {
     taskCategory: "code",
-    provider: "openrouter",
-    model: "stepfun/step-3.5-flash:free",
+    provider: "groq",
+    model: "openai/gpt-oss-20b",
   },
   {
     taskCategory: "complex",
-    provider: "openrouter",
-    model: "stepfun/step-3.5-flash:free",
+    provider: "groq",
+    model: "openai/gpt-oss-20b",
   },
   {
     taskCategory: "reasoning",
-    provider: "openrouter",
-    model: "stepfun/step-3.5-flash:free",
+    provider: "groq",
+    model: "openai/gpt-oss-20b",
   },
   { taskCategory: "embedding", provider: "local", model: "nomic-embed-text" },
 ];
@@ -178,26 +191,34 @@ const MODEL_SPECS: Record<
     speed: 0.85,
   },
 
-  // OpenRouter - Free models available
-  "google/gemma-2-9b-it:free": {
-    contextLength: 8192,
-    cost: 0,
-    quality: 0.78,
-    speed: 0.9,
-  },
-  "meta-llama/llama-3.2-90b-vision-instruct:free": {
+  // OpenRouter - Free models available. This whole section used to name
+  // three model IDs — "google/gemma-2-9b-it:free", "meta-llama/
+  // llama-3.2-90b-vision-instruct:free", "stepfun/step-3.5-flash:free" —
+  // NONE of which exist in OpenRouter's real, current model catalog
+  // (confirmed live against GET /api/v1/models: all three 404/missing).
+  // The routing rule using the stepfun one meant every OpenRouter-routed
+  // task failed on its very first request by default. Replaced with three
+  // models confirmed live, right now, to (a) actually exist and (b)
+  // successfully return native tool_calls against this codebase's real
+  // tool schemas (see OPENROUTER_FREE_TOOL_MODELS in OpenRouterProvider.ts,
+  // the single source of truth this list should be kept in sync with).
+  "openai/gpt-oss-20b:free": {
     contextLength: 128000,
     cost: 0,
-    quality: 0.88,
-    speed: 0.7,
+    quality: 0.82,
+    speed: 0.95,
   },
-
-  // StepFun - Free on OpenRouter
-  "stepfun/step-3.5-flash:free": {
+  "nvidia/nemotron-nano-9b-v2:free": {
+    contextLength: 128000,
+    cost: 0,
+    quality: 0.75,
+    speed: 0.95,
+  },
+  "google/gemma-4-31b-it:free": {
     contextLength: 128000,
     cost: 0,
     quality: 0.85,
-    speed: 0.9,
+    speed: 0.8,
   },
 };
 
@@ -299,6 +320,7 @@ export class ModelRouter {
           taskCategory,
           estimatedTokens,
           options?.exclude,
+          options?.preferQuality,
         );
       }
 
@@ -309,6 +331,7 @@ export class ModelRouter {
           taskCategory,
           estimatedTokens,
           options?.exclude,
+          options?.preferQuality,
         );
       }
 
@@ -335,7 +358,12 @@ export class ModelRouter {
     }
 
     // No rule found - use best available
-    return this.routeToBest(taskCategory, estimatedTokens, options?.exclude);
+    return this.routeToBest(
+      taskCategory,
+      estimatedTokens,
+      options?.exclude,
+      options?.preferQuality,
+    );
   }
 
   /**
@@ -454,6 +482,7 @@ export class ModelRouter {
     taskCategory: TaskCategory,
     estimatedTokens: number,
     exclude?: ProviderType[],
+    preferQuality?: boolean,
   ): Promise<RoutingResult> {
     // Fallback order: Local → Groq (free) → OpenRouter (free) → Paid providers
     const fallbackOrder: ProviderType[] = [
@@ -481,10 +510,19 @@ export class ModelRouter {
         }
 
         const provider = await this.factory.get(providerType);
-        const model = this.getDefaultModelForCategory(
-          providerType,
-          taskCategory,
-        );
+        // Previously always the default tier, regardless of the caller's
+        // preferQuality — meaning EVERY fallback (both the top-level
+        // "primary provider unavailable" case and attemptDynamicFallback's
+        // mid-task provider swap) silently dropped a reasoning/complex
+        // task back to the fast/small model even when the primary routing
+        // decision had correctly asked for the quality tier. Confirmed
+        // live: a real SWE-bench debug-mode task correctly requested
+        // preferQuality, but Groq's daily quota forced a fallback to
+        // OpenRouter, which landed on its default -20b model instead of
+        // the quality-tier one, with no path to have done otherwise.
+        const model = preferQuality
+          ? this.getBetterModel(taskCategory, providerType)
+          : this.getDefaultModelForCategory(providerType, taskCategory);
 
         console.log(chalk.gray(`  • Falling back to ${providerType}...`));
 
@@ -516,10 +554,11 @@ export class ModelRouter {
     taskCategory: TaskCategory,
     estimatedTokens: number,
     exclude?: ProviderType[],
+    preferQuality?: boolean,
   ): Promise<RoutingResult> {
     // No default/custom rule matched this category — delegate to the same
     // local-first fallback order used when a rule's provider is unavailable.
-    return this.routeToFallback(taskCategory, estimatedTokens, exclude);
+    return this.routeToFallback(taskCategory, estimatedTokens, exclude, preferQuality);
   }
 
   private resolveProvider(type: ProviderType): ProviderType {
@@ -528,6 +567,19 @@ export class ModelRouter {
   }
 
   private isPaidProvider(type: ProviderType): boolean {
+    // "openai" is a real, genuinely-paid provider UNLESS it's actually
+    // running in NVIDIA fallback mode (OPENAI_API_KEY absent, an NVIDIA
+    // key present — see OpenAIProvider.ts's constructor and
+    // ProviderRegistry.useNvidiaFallback(), the same detection reused
+    // here). Both cases share the same ProviderType, so this is the one
+    // place that has to tell them apart. Without this: the app's own
+    // `fallbackToPaid: false` safety default (config.ts) — a deliberate
+    // guard against silently spending real money — also silently blocks
+    // NVIDIA's genuinely free tier, confirmed live: an NVIDIA-only
+    // environment (no other provider keys configured) got "No available
+    // providers found" even though the NVIDIA key worked perfectly when
+    // tested directly.
+    if (type === "openai" && useNvidiaFallback()) return false;
     return PAID_PROVIDER_TYPES.has(type);
   }
 

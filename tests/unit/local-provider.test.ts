@@ -455,6 +455,50 @@ describe("LocalProvider — stream()", () => {
     expect(chunks[chunks.length - 1].done).toBe(true);
   });
 
+  it("forwards tools to the ollama streaming chat call in the correct shape", async () => {
+    async function* fakeStream() {
+      yield { message: { content: "ok" } };
+    }
+    chatMock.mockResolvedValue(fakeStream());
+    const tools = [
+      {
+        name: "search",
+        description: "search things",
+        parameters: { type: "object" as const, properties: { q: { type: "string" } } },
+      },
+    ];
+    for await (const _ of ollamaProvider().stream(userMsg, { tools } as CompletionOptions)) {
+      // drain
+    }
+    expect(chatMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stream: true,
+        tools: [
+          { type: "function", function: { name: "search", description: "search things", parameters: tools[0].parameters } },
+        ],
+      }),
+    );
+  });
+
+  it("collects whole tool_calls entries from ollama stream chunks into toolCalls on the final chunk", async () => {
+    async function* fakeStream() {
+      yield {
+        message: {
+          content: "",
+          tool_calls: [{ function: { name: "search", arguments: { q: "cats" } } }],
+        },
+      };
+    }
+    chatMock.mockResolvedValue(fakeStream());
+    const chunks: Array<{ toolCalls?: unknown; done: boolean }> = [];
+    for await (const chunk of ollamaProvider().stream(userMsg)) {
+      chunks.push(chunk);
+    }
+    const last = chunks[chunks.length - 1];
+    expect(last.done).toBe(true);
+    expect(last.toolCalls).toEqual([{ name: "search", params: { q: "cats" } }]);
+  });
+
   it("lmstudio stream parses SSE 'data:' lines and skips [DONE]", async () => {
     const encoder = new TextEncoder();
     const body = [

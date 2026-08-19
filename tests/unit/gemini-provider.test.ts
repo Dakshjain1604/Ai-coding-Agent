@@ -279,4 +279,40 @@ describe("GeminiProvider — stream()", () => {
     expect(chunks.map((c) => c.content)).toEqual(["hel", "lo", ""]);
     expect(chunks[chunks.length - 1].done).toBe(true);
   });
+
+  it("forwards tools as a functionDeclarations block to getGenerativeModel for streaming", async () => {
+    async function* fakeStream() {
+      yield { text: () => "ok" };
+    }
+    generateContentStreamMock.mockResolvedValue({ stream: fakeStream() });
+    const tools = [
+      {
+        name: "search",
+        description: "search things",
+        parameters: { type: "object" as const, properties: { q: { type: "string" } } },
+      },
+    ];
+    for await (const _ of makeProvider().stream(userMsg, { tools })) {
+      // drain
+    }
+    expect(getGenerativeModelMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: [{ functionDeclarations: [expect.objectContaining({ name: "search" })] }],
+      }),
+    );
+  });
+
+  it("collects functionCalls() from stream chunks into toolCalls on the final chunk", async () => {
+    async function* fakeStream() {
+      yield { text: () => "", functionCalls: () => [{ name: "search", args: { q: "cats" } }] };
+    }
+    generateContentStreamMock.mockResolvedValue({ stream: fakeStream() });
+    const chunks: Array<{ toolCalls?: unknown; done: boolean }> = [];
+    for await (const chunk of makeProvider().stream(userMsg)) {
+      chunks.push(chunk);
+    }
+    const last = chunks[chunks.length - 1];
+    expect(last.done).toBe(true);
+    expect(last.toolCalls).toEqual([{ name: "search", params: { q: "cats" } }]);
+  });
 });

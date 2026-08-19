@@ -18,6 +18,13 @@ import { getTaskAnalyzer } from "./TaskAnalyzer.js";
 import { getParallelOrchestrator, type SubTaskPlan } from "./ParallelOrchestrator.js";
 import type { AgentMode } from "../agents/system-prompts.js";
 
+/** Agent types that map to BaseAgent.getTaskCategory()'s "reasoning"/
+ * "complex" categories — see the preferQuality wiring in
+ * BaseAgent.initializeContext() and the timeout floor below, both keyed
+ * off the same distinction. */
+const REASONING_AGENT_TYPES = new Set<AgentType>(["debug", "plan", "orchestrator"]);
+const REASONING_TIMEOUT_FLOOR_MS = 300000;
+
 export interface SpawnedAgent {
   id: string;
   type: AgentType;
@@ -310,6 +317,14 @@ export class AgentSpawner {
   ): Promise<TaskResult> {
     return new Promise<TaskResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
+        // See BaseAgent.cancel()'s comment — without this, rejecting this
+        // wrapper promise only stops the CALLER from waiting any longer;
+        // the underlying agent.execute() call below keeps running for as
+        // long as it wants, fully unsupervised. Confirmed live: several
+        // more tool calls (including a destructive file_write) executed
+        // for minutes after a real timeout was already reported as a
+        // failure to the user.
+        spawned.agent.cancel();
         reject(new Error(`Agent execution timed out after ${timeout}ms`));
       }, timeout);
 
@@ -360,6 +375,25 @@ export function getAgentSpawner(maxParallel?: number): AgentSpawner {
     agentSpawnerInstance = new AgentSpawner(maxParallel);
   }
   return agentSpawnerInstance;
+}
+
+/**
+ * Reframes a pipeline stage's description for its role, instead of handing
+ * every stage the same raw imperative task text ("Create a file called
+ * hello.txt..."). Confirmed live: a 'plan' stage given that text verbatim
+ * tried to satisfy it directly by calling file_write — a tool 'plan' mode's
+ * own tool set doesn't include (deliberately: planning should hand actual
+ * file changes to a 'code' stage) — and Groq's grammar-constrained tool
+ * decoding rejected the resulting out-of-schema call with a hard 400
+ * ("Parsing failed" / "Tool choice is none, but model called a tool").
+ * 'code'/'debug'/'test'/'review' stages already have the tools their raw
+ * imperative task text asks for, so only 'plan' needs reframing.
+ */
+function describeSubtask(mode: AgentMode, taskDescription: string): string {
+  if (mode === "plan") {
+    return `Produce a step-by-step implementation plan for the following task. Do NOT attempt to execute it yourself (you do not have file-writing tools) — a later stage will implement your plan.\n\nTask: ${taskDescription}`;
+  }
+  return taskDescription;
 }
 
 /**
@@ -414,15 +448,21 @@ export async function executeTask(task: Task): Promise<TaskResult> {
   // its existing, deliberate, already-correct behavior.
   const strategy = analysis.suggestedStrategy;
   if (!commandOverride && strategy.mode !== "single" && strategy.agents.length > 1) {
-    const subtasks: SubTaskPlan[] = strategy.agents.map((type) => ({
+    const subtasks: SubTaskPlan[] = strategy.agents.map((type) => {
       // 'orchestrator' isn't a real AgentMode — UniversalAgent's own
       // agent-factory registration (registerAgentFactories()) already
       // maps it to 'plan' for the exact same reason; mirrored here so a
       // pipeline naming 'orchestrator' as a stage doesn't crash.
-      mode: (type === "orchestrator" ? "plan" : type) as AgentMode,
-      description: task.description,
-    }));
-    return getParallelOrchestrator().executePipeline(task, subtasks, [], 0);
+      const mode = (type === "orchestrator" ? "plan" : type) as AgentMode;
+      return { mode, description: describeSubtask(mode, task.description) };
+    });
+    // No `parentToolNames` argument: this is the root of execution, not a
+    // spawn_subagent call from a live parent agent — passing `[]` here
+    // used to make every stage's narrowChildTools() intersect against an
+    // empty set and silently strip every tool from every stage (a real,
+    // confirmed-live bug — see executePipeline's caller-distinction
+    // comment in ParallelOrchestrator.ts).
+    return getParallelOrchestrator().executePipeline(task, subtasks, undefined, 0);
   }
 
   // Spawn and execute — getSpawnOptions() clamps the timeout/parallelism
@@ -430,5 +470,24 @@ export async function executeTask(task: Task): Promise<TaskResult> {
   // timeout under high load) instead of every task always getting the
   // same fixed default regardless of system state.
   const spawned = await spawner.spawn(agentType, task);
-  return spawner.execute(spawned.id, spawner.getSpawnOptions());
+  const spawnOptions = spawner.getSpawnOptions();
+
+  // Reasoning-category agent types (debug/plan/orchestrator — see
+  // BaseAgent.getTaskCategory()) now route to the slower, more capable
+  // "quality" tier model by design (BaseAgent.initializeContext()'s
+  // preferQuality wiring), but getSpawnOptions()'s timeout is purely
+  // system-load-driven and can be as low as 120s under "critical" status
+  // — a floor that doesn't account for that tradeoff at all. Confirmed
+  // live: a real investigative SWE-bench task's LLM calls alone took
+  // ~4 minutes total on this machine (reported "critical" due to memory
+  // pressure), comfortably inside a 5-minute budget but well past the
+  // 120s one, and got cut off mid-investigation as a result.
+  if (REASONING_AGENT_TYPES.has(agentType)) {
+    spawnOptions.timeout = Math.max(
+      spawnOptions.timeout ?? REASONING_TIMEOUT_FLOOR_MS,
+      REASONING_TIMEOUT_FLOOR_MS,
+    );
+  }
+
+  return spawner.execute(spawned.id, spawnOptions);
 }
