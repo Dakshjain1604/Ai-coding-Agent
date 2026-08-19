@@ -463,3 +463,4 @@ local.properties
 
 # TODO: Adjust this list for your project, then duplicate it to .gitignore_template
 # to avoid committing this file to your repository.
+swe-bench/
