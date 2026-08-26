@@ -70,18 +70,41 @@ class FakeProvider extends BaseProvider {
  * providers for exactly the types given — every other type is left
  * genuinely unavailable, matching how a real environment with only some
  * API keys configured behaves. */
+const ALL_PROVIDER_TYPES: ProviderType[] = [
+  "ollama",
+  "claude",
+  "openai",
+  "gemini",
+  "local",
+  "groq",
+  "openrouter",
+  "huggingface",
+  "ollama-cloud",
+];
+
 function seedProviders(types: ProviderType[], preferLocal = false): void {
   ProviderFactory.reset();
   const factory = ProviderFactory.getInstance({ preferLocal });
+  const availability = (factory as unknown as { availability: Map<ProviderType, boolean> })
+    .availability;
+  // Mark every type not explicitly seeded as unavailable up front. Without
+  // this, isAvailable() falls through to actually instantiating a real
+  // provider and calling its live isAvailable() — e.g. a real LocalProvider
+  // doing a real network health check against whatever Ollama happens to be
+  // running on the machine executing the tests, making these tests depend
+  // on host state instead of being hermetic (confirmed live: every
+  // routeToFallback ordering test here failed on a machine with a real
+  // local Ollama server running, because "local" won every routing
+  // decision regardless of what was seeded).
+  for (const type of ALL_PROVIDER_TYPES) {
+    availability.set(type, false);
+  }
   for (const type of types) {
     (factory as unknown as { providers: Map<ProviderType, BaseProvider> }).providers.set(
       type,
       new FakeProvider(type),
     );
-    (factory as unknown as { availability: Map<ProviderType, boolean> }).availability.set(
-      type,
-      true,
-    );
+    availability.set(type, true);
   }
 }
 

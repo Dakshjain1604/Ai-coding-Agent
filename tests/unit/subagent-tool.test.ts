@@ -17,7 +17,42 @@ import {
   pushSubagentContext,
   popSubagentContext,
 } from "../../src/core/agents/subagent-context.js";
+import { ProviderFactory } from "../../src/providers/ProviderFactory.js";
+import type { ProviderType } from "../../src/utils/types.js";
 import type { Task } from "../../src/utils/types.js";
+
+const ALL_PROVIDER_TYPES: ProviderType[] = [
+  "ollama",
+  "claude",
+  "openai",
+  "gemini",
+  "local",
+  "groq",
+  "openrouter",
+  "huggingface",
+  "ollama-cloud",
+];
+
+/** Forces every provider genuinely unavailable so a downstream execute()
+ * fails immediately instead of reaching a real provider. Without this, the
+ * "pipeline cap" test below actually reached the real local Ollama server
+ * running on this machine, whose failed completion call retried with
+ * exponential backoff past this suite's 5s test timeout — the abandoned
+ * async work then popped/pushed the shared subagent-context stack in the
+ * background after the test had already "finished," corrupting the depth
+ * seen by whichever test ran next (confirmed live: caused the unrelated
+ * "no active context" test below to see a stale depth of 2 and report
+ * "Sub-agent depth limit reached" instead of "outside of an active agent
+ * task"). */
+function seedNoProviders(): void {
+  ProviderFactory.reset();
+  const factory = ProviderFactory.getInstance({ preferLocal: false });
+  const availability = (factory as unknown as { availability: Map<ProviderType, boolean> })
+    .availability;
+  for (const type of ALL_PROVIDER_TYPES) {
+    availability.set(type, false);
+  }
+}
 
 function makeTask(id: string): Task {
   return {
@@ -77,14 +112,18 @@ describe("spawnSubagentTool — subtasks array validation", () => {
       description: `subtask ${i}`,
     }));
     // Push a context so it gets past the "no active task" check too, then
-    // it will fail downstream trying to reach a real provider — that's
-    // fine, we're only asserting it wasn't rejected for length.
+    // it will fail downstream since no provider is available — that's
+    // fine, we're only asserting it wasn't rejected for length. Provider
+    // availability is forced off so this fails fast and deterministically
+    // instead of reaching a real provider (see seedNoProviders() above).
+    seedNoProviders();
     pushSubagentContext({ parentTask: makeTask("p1"), parentToolNames: [] });
     try {
       const result = await callHandler({ subtasks });
       expect(result.output).not.toContain("capped at");
     } finally {
       popSubagentContext();
+      ProviderFactory.reset();
     }
   });
 });
