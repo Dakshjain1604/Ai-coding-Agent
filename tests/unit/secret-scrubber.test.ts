@@ -26,8 +26,12 @@ describe("scrubSecrets", () => {
   });
 
   it("redacts vendor-prefixed bearer tokens (Groq-style)", () => {
-    const out = scrubSecrets("GROQ_API_KEY=gsk_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
-    expect(out).not.toContain("gsk_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    // Built at runtime (not a literal) so no long high-entropy string ever
+    // lives in source/history — it just needs to match the gsk_ + 20+
+    // [A-Za-z0-9_-] shape that BARE_TOKEN_PATTERNS looks for.
+    const fakeGroqKey = `gsk_${"A".repeat(52)}`;
+    const out = scrubSecrets(`GROQ_API_KEY=${fakeGroqKey}`);
+    expect(out).not.toContain(fakeGroqKey);
   });
 
   it("redacts Authorization: Bearer headers", () => {
