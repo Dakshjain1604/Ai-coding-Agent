@@ -468,4 +468,5 @@ swe-bench/
 # CodingAgent runtime/generated state -- task sandboxes, execution traces,
 # and CLI output logs -- not source.
 .codingagent/
+.traces/
 output/
