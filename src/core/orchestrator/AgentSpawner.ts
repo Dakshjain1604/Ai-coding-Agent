@@ -84,6 +84,7 @@ export class AgentSpawner {
     return {
       maxParallel: Math.min(
         overrides?.maxParallel ?? this.maxParallel,
+        this.maxParallel,
         systemCaps.recommendedMaxAgents,
         config.defaults.maxParallelAgents,
       ),
