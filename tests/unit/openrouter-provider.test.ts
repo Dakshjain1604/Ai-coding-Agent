@@ -228,6 +228,25 @@ describe("OpenRouterProvider — free-tier rate-limit spreading (models array)",
     expect(createMock.mock.calls[0][0].models).toBeUndefined();
   });
 
+  it("does NOT send a `models` fallback list for an explicitly chosen free model outside the curated pool", async () => {
+    createMock.mockResolvedValue(chatCompletion());
+    await makeProvider().complete(userMsg, { model: "nvidia/nemotron-3-ultra-550b-a55b:free" });
+    const sent = createMock.mock.calls[0][0];
+    expect(sent.model).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+    expect(sent.models).toBeUndefined();
+  });
+
+  it("does NOT send a `models` fallback list for a non-curated free model on the streaming path", async () => {
+    async function* fakeStream() {
+      yield { choices: [{ delta: { content: "ok" } }] };
+    }
+    createMock.mockResolvedValue(fakeStream());
+    for await (const _ of makeProvider().stream(userMsg, { model: "nvidia/nemotron-3-ultra-550b-a55b:free" })) {
+      // drain
+    }
+    expect(createMock.mock.calls[0][0].models).toBeUndefined();
+  });
+
   it("sends the same `models` fallback list on the streaming path", async () => {
     async function* fakeStream() {
       yield { choices: [{ delta: { content: "ok" } }] };
@@ -302,6 +321,8 @@ describe("OpenRouterProvider — stream()", () => {
     }
     const last = chunks[chunks.length - 1];
     expect(last.done).toBe(true);
-    expect(last.toolCalls).toEqual([{ id: "call_1", name: "search", params: { q: "cats" } }]);
+    expect(last.toolCalls).toEqual([
+      { id: "call_1", name: "search", params: { q: "cats" }, rawArguments: `{"q":"cats"}` },
+    ]);
   });
 });

@@ -47,7 +47,7 @@ export function accumulateOpenAIToolCallDeltas() {
         } catch {
           params = {};
         }
-        calls.push({ id, name, params });
+        calls.push({ id, name, params, rawArguments: argsStr });
       }
       return calls;
     },

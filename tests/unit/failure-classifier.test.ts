@@ -33,8 +33,8 @@ describe("classifyFailure — payload_too_large", () => {
     );
   });
 
-  it("recognizes 'context length exceeded' phrasing (OpenAI-style)", () => {
-    expectCategory(new Error("This model's maximum context length exceeded"), "payload_too_large", false);
+  it("classifies 'maximum context length' as context_overflow, not a per-minute payload limit", () => {
+    expectCategory(new Error("This model's maximum context length exceeded"), "context_overflow", false);
   });
 
   it("recognizes 'too many tokens' phrasing", () => {
@@ -487,5 +487,102 @@ describe("classifyFailure — documented limitation: bare payment-required signa
     const result = classifyFailure(new Error("402 Payment Required"));
     expect(result.category).toBe("unknown");
     expect(result.retryable).toBe(true);
+  });
+});
+
+describe("classifyFailure — quota_exhausted", () => {
+  it("recognizes OpenRouter's free-models-per-day 429 (seen live) despite its 429 status", () => {
+    const err = Object.assign(
+      new Error("429 Rate limit exceeded: free-models-per-day. Add 5 credits to unlock 1000 free model requests per day"),
+      { status: 429 },
+    );
+    expectCategory(err, "quota_exhausted", false);
+  });
+
+  it("recognizes HTTP 402 payment required", () => {
+    expectCategory(Object.assign(new Error("Payment Required"), { status: 402 }), "quota_exhausted", false);
+  });
+
+  it("recognizes OpenAI's 'exceeded your current quota' billing error", () => {
+    expectCategory(
+      new Error("429 You exceeded your current quota, please check your plan and billing details."),
+      "quota_exhausted",
+      false,
+    );
+  });
+
+  it("recognizes 'insufficient credits'", () => {
+    expectCategory(new Error("Insufficient credits for this request"), "quota_exhausted", false);
+  });
+
+  it("still treats a per-minute rate limit as a retryable rate_limit", () => {
+    expectCategory(
+      Object.assign(new Error("429 Rate limit reached on tokens per minute (TPM). Please try again in 5s."), { status: 429 }),
+      "rate_limit",
+      true,
+    );
+  });
+});
+
+describe("classifyFailure — short-window limits are never treated as exhausted quotas", () => {
+  it("keeps Groq's per-minute 429 retryable even though it links to a billing page (seen live)", () => {
+    const err = Object.assign(
+      new Error(
+        "429 Rate limit reached for model `openai/gpt-oss-120b` in organization `org_x` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Used 6870, Requested 1616. Please try again in 3.645s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing",
+      ),
+      { status: 429 },
+    );
+    expectCategory(err, "rate_limit", true);
+  });
+
+  it("does not treat the bare word 'billing' as quota exhaustion", () => {
+    expectCategory(Object.assign(new Error("429 Too Many Requests. See billing docs."), { status: 429 }), "rate_limit", true);
+  });
+});
+
+describe("classifyFailure — invalid_model_output", () => {
+  it("retries Groq's malformed tool-call JSON error (seen live, no status)", () => {
+    expectCategory(new Error("Failed to parse tool call arguments as JSON"), "invalid_model_output", true);
+  });
+
+  it("retries tool_use_failed even when reported as HTTP 400", () => {
+    const err = Object.assign(new Error('400 {"code":"tool_use_failed","message":"Tool call validation failed: parameters did not match schema"}'), { status: 400 });
+    expectCategory(err, "invalid_model_output", true);
+  });
+
+  it("still treats an ordinary 400 as a non-retryable invalid_request", () => {
+    expectCategory(Object.assign(new Error("400 Bad Request: unknown field"), { status: 400 }), "invalid_request", false);
+  });
+});
+
+describe("classifyFailure — context_overflow", () => {
+  it("recognizes OpenAI's context_length_exceeded 400 despite its status", () => {
+    const err = Object.assign(
+      new Error("400 This model's maximum context length is 128000 tokens. However, your messages resulted in 130512 tokens. Please reduce the length of the messages. (code: context_length_exceeded)"),
+      { status: 400 },
+    );
+    expectCategory(err, "context_overflow", false);
+  });
+
+  it("recognizes Anthropic-style 'prompt is too long' relayed through OpenRouter's upstream detail", () => {
+    expectCategory(
+      new Error('400 Provider returned error | provider: Anthropic | upstream: {"type":"error","error":{"message":"prompt is too long: 210000 tokens > 200000 maximum"}}'),
+      "context_overflow",
+      false,
+    );
+  });
+
+  it("keeps a per-minute token 413 as payload_too_large", () => {
+    expectCategory(
+      new Error("413 Request too large for model on tokens per minute (TPM): Limit 8000, Requested 9000. Please try again in 5s."),
+      "payload_too_large",
+      false,
+    );
+  });
+
+  it("shares payload_too_large's flags, so the legacy agent's handling is unchanged", () => {
+    const overflow = classifyFailure(new Error("maximum context length exceeded"));
+    const payload = classifyFailure(new Error("413 payload too large"));
+    expect([overflow.retryable, overflow.shouldChangeStrategy]).toEqual([payload.retryable, payload.shouldChangeStrategy]);
   });
 });

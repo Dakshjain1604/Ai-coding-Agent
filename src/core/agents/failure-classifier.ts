@@ -17,6 +17,9 @@
  */
 
 export type FailureCategory =
+  | "quota_exhausted"
+  | "invalid_model_output"
+  | "context_overflow"
   | "rate_limit"
   | "payload_too_large"
   | "auth"
@@ -192,8 +195,70 @@ const INTERNAL_ERROR_NAMES = new Set([
   "RangeError",
 ]);
 
+/**
+ * An exhausted account quota (daily free-model cap, no credits, billing
+ * limit) often arrives as HTTP 429 — the same status as a transient rate
+ * limit — but no amount of backoff clears it within a task. Confirmed live:
+ * OpenRouter's "free-models-per-day" 429 was retried 9 times per call before
+ * the task failed. Checked ahead of the status-code mapping for that reason.
+ */
+const QUOTA_EXHAUSTED_PATTERN =
+  /per-day|per day|daily (?:limit|quota)|insufficient (?:credits|funds|balance)|credit balance|exceeded your current quota/i;
+
+/**
+ * Signals that a limit is a short rolling window, whatever else the message
+ * says. Confirmed live: Groq's per-minute 429 ends with an upsell link to
+ * ".../settings/billing" — keyword-matching that as an exhausted quota made
+ * a 4-second wait fatal. A stated retry time is authoritative.
+ */
+const SHORT_WINDOW_PATTERN = /per minute|\b[TR]PM\b|try again in \d/i;
+
+/**
+ * The provider rejected what the MODEL generated (malformed tool-call JSON,
+ * schema-violating arguments) — sometimes reported as HTTP 400, but unlike a
+ * malformed request from our side, a fresh sample usually succeeds.
+ * Confirmed live on Groq: "Failed to parse tool call arguments as JSON",
+ * error code "tool_use_failed".
+ */
+/**
+ * The prompt no longer fits the model's context window. Distinct from a 413
+ * over a per-minute token limit (payload_too_large): here the conversation
+ * itself must shrink. OpenAI reports it as a 400 (code
+ * context_length_exceeded), so it is matched ahead of the status mapping.
+ */
+const CONTEXT_OVERFLOW_PATTERN =
+  /context_length_exceeded|maximum context length|context length (?:exceeded|is)|context window|prompt is too long|input is too long|reduce the length of the (?:messages|input|prompt)/i;
+
+const INVALID_MODEL_OUTPUT_PATTERN =
+  /tool_use_failed|failed to parse tool call|tool call validation failed|did not call a tool/i;
+
 export function classifyFailure(error: unknown): ClassifiedFailure {
   const status = extractStatusCode(error);
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  if (CONTEXT_OVERFLOW_PATTERN.test(rawMessage) && !SHORT_WINDOW_PATTERN.test(rawMessage)) {
+    return {
+      category: "context_overflow",
+      retryable: false,
+      shouldChangeStrategy: true,
+      reason: "The prompt exceeds the model's context window — the conversation must be shortened before retrying.",
+    };
+  }
+  if (INVALID_MODEL_OUTPUT_PATTERN.test(rawMessage)) {
+    return {
+      category: "invalid_model_output",
+      retryable: true,
+      shouldChangeStrategy: false,
+      reason: "The provider rejected the model's generated output (e.g. malformed tool-call JSON) — a fresh sample usually succeeds.",
+    };
+  }
+  if (status === 402 || (QUOTA_EXHAUSTED_PATTERN.test(rawMessage) && !SHORT_WINDOW_PATTERN.test(rawMessage))) {
+    return {
+      category: "quota_exhausted",
+      retryable: false,
+      shouldChangeStrategy: true,
+      reason: "Account quota or credit exhausted — retrying cannot succeed until the quota resets or credit is added.",
+    };
+  }
   if (status !== undefined) {
     const byStatus = classifyByStatus(status);
     if (byStatus) return byStatus;

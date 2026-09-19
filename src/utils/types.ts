@@ -95,16 +95,20 @@ export interface SpawnStrategy {
 // Provider Types
 // ============================================================================
 
-export type ProviderType =
-  | "ollama"
-  | "claude"
-  | "openai"
-  | "gemini"
-  | "local"
-  | "groq"
-  | "openrouter"
-  | "huggingface"
-  | "ollama-cloud";
+/** Runtime list of provider types — the single source of truth for ProviderType and config validation. */
+export const PROVIDER_TYPES = [
+  "ollama",
+  "claude",
+  "openai",
+  "gemini",
+  "local",
+  "groq",
+  "openrouter",
+  "huggingface",
+  "ollama-cloud",
+] as const;
+
+export type ProviderType = (typeof PROVIDER_TYPES)[number];
 
 export interface ProviderConfig {
   type: ProviderType;
@@ -123,6 +127,8 @@ export interface ToolCall {
   id?: string;
   name: string;
   params: Record<string, unknown>;
+  /** The argument string exactly as the model streamed it (params is its parsed form, {} if unparseable). */
+  rawArguments?: string;
 }
 
 export interface ToolSchema {
@@ -234,6 +240,8 @@ export interface AppConfig {
     maxPaidApiCalls: number;
     outputDir: string;
     streaming: boolean;
+    /** "<provider>/<model>" — pins every LLM call to this model (see config.ts DefaultsSchema). */
+    model?: string;
   };
   [key: string]: unknown;
 }

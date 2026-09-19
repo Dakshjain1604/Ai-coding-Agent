@@ -7,7 +7,7 @@ import type { ProviderType } from "../utils/types.js";
 import { getLogger } from "../utils/logger.js";
 import { ProviderFactory } from "./ProviderFactory.js";
 import { BaseProvider } from "./ProviderInterface.js";
-import { ProviderError } from "../utils/types.js";
+import { PROVIDER_TYPES, ProviderError } from "../utils/types.js";
 import chalk from "chalk";
 import { getModelFor, useNvidiaFallback } from "./ProviderRegistry.js";
 import { getModelCatalog } from "./ModelCatalog.js";
@@ -36,6 +36,28 @@ export interface RoutingConfig {
   maxPaidApiCalls: number;
   costPreference: CostPreference;
   customRules: RoutingRule[];
+  /** "<provider>/<model>" — when set, route() always returns exactly this and never falls back. */
+  pinnedModel?: string;
+}
+
+/**
+ * Splits a "<provider>/<model>" spec at the FIRST slash — model IDs such as
+ * OpenRouter's "nvidia/nemotron-3-ultra-550b-a55b:free" contain slashes too.
+ */
+export function parsePinnedModel(spec: string): { provider: ProviderType; model: string } {
+  const slash = spec.indexOf("/");
+  const provider = spec.slice(0, slash);
+  const model = spec.slice(slash + 1);
+  if (slash <= 0 || !model) {
+    throw new ProviderError(`Invalid model spec "${spec}": expected "<provider>/<model>"`, "local");
+  }
+  if (!(PROVIDER_TYPES as readonly string[]).includes(provider)) {
+    throw new ProviderError(
+      `Invalid model spec "${spec}": unknown provider "${provider}" (expected one of ${PROVIDER_TYPES.join(", ")})`,
+      "local",
+    );
+  }
+  return { provider: provider as ProviderType, model };
 }
 
 /** Providers billed per-token — matches canMakePaidCall()'s own counting. */
@@ -271,6 +293,20 @@ export class ModelRouter {
       exclude?: ProviderType[];
     },
   ): Promise<RoutingResult> {
+    // A pinned model wins over every rule, tier and preference. When the
+    // caller excludes its provider (i.e. it already failed and the caller is
+    // asking for a fallback), refuse instead of silently switching models.
+    if (this.config.pinnedModel) {
+      const { provider, model } = parsePinnedModel(this.config.pinnedModel);
+      if (options?.exclude?.includes(provider)) {
+        throw new ProviderError(
+          `Pinned model ${this.config.pinnedModel} failed; not falling back to another model`,
+          provider,
+        );
+      }
+      return this.routeTo(provider, model, estimatedTokens);
+    }
+
     // Check for custom rule first — but only actually use it if it doesn't
     // route to a paid provider we're out of budget for; canMakePaidCall()/
     // recordCall() used to have zero callers anywhere, so maxPaidApiCalls

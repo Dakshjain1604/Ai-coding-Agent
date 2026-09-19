@@ -378,7 +378,9 @@ describe("GroqProvider — stream()", () => {
     }
     const last = chunks[chunks.length - 1];
     expect(last.done).toBe(true);
-    expect(last.toolCalls).toEqual([{ id: "call_1", name: "search", params: { q: "cats" } }]);
+    expect(last.toolCalls).toEqual([
+      { id: "call_1", name: "search", params: { q: "cats" }, rawArguments: `{"q":"cats"}` },
+    ]);
   });
 
   it("leaves toolCalls undefined on the final chunk when no tool_calls were streamed", async () => {

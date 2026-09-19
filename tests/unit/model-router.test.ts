@@ -15,7 +15,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { ProviderFactory } from "../../src/providers/ProviderFactory.js";
-import { ModelRouter, getModelRouter, resetModelRouter } from "../../src/providers/ModelRouter.js";
+import {
+  ModelRouter,
+  getModelRouter,
+  parsePinnedModel,
+  resetModelRouter,
+} from "../../src/providers/ModelRouter.js";
 import { BaseProvider } from "../../src/providers/ProviderInterface.js";
 import type {
   CompletionResult,
@@ -429,6 +434,92 @@ describe("ModelRouter — routeTo() (explicit override, bypasses the paid cap)",
     router.recordCall("claude"); // already well over the cap
     const result = await router.routeTo("claude", "claude-opus-4-6");
     expect(result.provider.getType()).toBe("claude");
+  });
+});
+
+describe("parsePinnedModel", () => {
+  it("splits at the first slash so model IDs may contain slashes", () => {
+    expect(parsePinnedModel("openrouter/nvidia/nemotron-3-ultra-550b-a55b:free")).toEqual({
+      provider: "openrouter",
+      model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+    });
+  });
+
+  it("accepts a model ID without slashes", () => {
+    expect(parsePinnedModel("groq/llama-3.3-70b")).toEqual({ provider: "groq", model: "llama-3.3-70b" });
+  });
+
+  it.each([["no-slash"], ["/model-only"], ["openrouter/"], [""]])(
+    "rejects a malformed spec %j",
+    (spec) => {
+      expect(() => parsePinnedModel(spec)).toThrow(/expected "<provider>\/<model>"/);
+    },
+  );
+
+  it("rejects an unknown provider, naming the valid ones", () => {
+    expect(() => parsePinnedModel("acme/some-model")).toThrow(/unknown provider "acme".*openrouter/);
+  });
+});
+
+describe("ModelRouter — pinnedModel", () => {
+  const PIN = "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free";
+
+  it("routes every task category to exactly the pinned provider and model", async () => {
+    seedProviders(["groq", "openrouter", "claude"]);
+    const router = new ModelRouter({ pinnedModel: PIN });
+    for (const category of ["simple", "code", "complex", "reasoning"] as const) {
+      const result = await router.route(category);
+      expect(result.provider.getType()).toBe("openrouter");
+      expect(result.model).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+    }
+  });
+
+  it("wins over custom rules and quality/speed preferences", async () => {
+    seedProviders(["groq", "openrouter"]);
+    const router = new ModelRouter({
+      pinnedModel: PIN,
+      customRules: [{ taskCategory: "code", provider: "groq", model: "other" }],
+    });
+    expect((await router.route("code")).model).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
+    expect((await router.route("reasoning", 1000, { preferQuality: true })).provider.getType()).toBe(
+      "openrouter",
+    );
+    expect((await router.route("simple", 1000, { preferSpeed: true })).provider.getType()).toBe(
+      "openrouter",
+    );
+  });
+
+  it("refuses to fall back when the pinned provider is excluded, even if others are available", async () => {
+    seedProviders(["groq", "openrouter"]);
+    const router = new ModelRouter({ pinnedModel: PIN });
+    await expect(router.route("code", 1000, { exclude: ["openrouter"] })).rejects.toThrow(
+      /not falling back/,
+    );
+  });
+
+  it("ignores exclusions of other providers", async () => {
+    seedProviders(["groq", "openrouter"]);
+    const router = new ModelRouter({ pinnedModel: PIN });
+    const result = await router.route("code", 1000, { exclude: ["groq"] });
+    expect(result.provider.getType()).toBe("openrouter");
+  });
+
+  it("throws rather than substituting when the pinned provider is unavailable", async () => {
+    seedProviders(["groq"]);
+    const router = new ModelRouter({ pinnedModel: PIN });
+    await expect(router.route("code")).rejects.toThrow(/not available/i);
+  });
+
+  it("surfaces a malformed pin at routing time", async () => {
+    seedProviders(["groq"]);
+    const router = new ModelRouter({ pinnedModel: "nonsense" });
+    await expect(router.route("code")).rejects.toThrow(/Invalid model spec/);
+  });
+
+  it("routes normally when no pin is configured", async () => {
+    seedProviders(["groq"]);
+    const router = new ModelRouter({ preferLocal: false });
+    expect((await router.route("code")).provider.getType()).toBe("groq");
   });
 });
 

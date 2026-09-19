@@ -94,7 +94,10 @@ export class OpenRouterProvider extends BaseProvider {
    * inferior) model on failure.
    */
   private buildModelsList(model: string): string[] | undefined {
-    if (!model.endsWith(":free")) return undefined;
+    // Only the curated pool backs itself up. Any other model — paid, or a
+    // free model the user chose explicitly — is never silently swapped for
+    // a different one, so results stay attributable to the requested model.
+    if (!OPENROUTER_FREE_TOOL_MODELS.includes(model)) return undefined;
     return [model, ...OPENROUTER_FREE_TOOL_MODELS.filter((m) => m !== model)];
   }
 

@@ -14,24 +14,17 @@ import type {
   AgentConfig,
   AgentType,
 } from "./types.js";
-import { CodingAgentError } from "./types.js";
+import { CodingAgentError, PROVIDER_TYPES } from "./types.js";
+
+/** Env var that pins every LLM call to one "<provider>/<model>" (overrides config files). */
+export const MODEL_ENV_VAR = "CODING_AGENT_MODEL";
 
 // ============================================================================
 // Config Schemas
 // ============================================================================
 
 const ProviderConfigSchema = z.object({
-  type: z.enum([
-    "ollama",
-    "claude",
-    "openai",
-    "gemini",
-    "local",
-    "groq",
-    "openrouter",
-    "huggingface",
-    "ollama-cloud",
-  ]),
+  type: z.enum(PROVIDER_TYPES),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
   models: z
@@ -61,6 +54,18 @@ const DefaultsSchema = z.object({
   outputDir: z.string().default("output"),
   /** Stream LLM tokens to the terminal as they arrive, instead of buffering the full response. */
   streaming: z.boolean().default(true),
+  /**
+   * Pins every LLM call to exactly one model, as "<provider>/<model>" (e.g.
+   * "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"). When set, routing
+   * never substitutes another provider or model — a failing call is retried
+   * on the same model or surfaced, so results are attributable to one model.
+   */
+  model: z
+    .string()
+    .refine((spec) => spec.indexOf("/") > 0, {
+      message: 'defaults.model must be "<provider>/<model>"',
+    })
+    .optional(),
 });
 
 const AppConfigSchema = z.object({
@@ -123,6 +128,11 @@ export class ConfigManager {
       globalConfig,
       projectConfig,
     ) as AppConfig;
+
+    const envModel = process.env[MODEL_ENV_VAR]?.trim();
+    if (envModel) {
+      this.config.defaults = { ...this.config.defaults, model: envModel };
+    }
 
     const result = AppConfigSchema.safeParse(this.config);
     if (!result.success) {

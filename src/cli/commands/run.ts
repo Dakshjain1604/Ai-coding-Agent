@@ -10,6 +10,8 @@ import { getTaskAnalyzer } from "../../core/orchestrator/TaskAnalyzer.js";
 import { executeTask } from "../../core/orchestrator/AgentSpawner.js";
 import { validateProviders } from "../../utils/healthcheck.js";
 import { getPermissionSystem } from "../../utils/permission-system.js";
+import { getConfigManager } from "../../utils/config.js";
+import { parsePinnedModel } from "../../providers/ModelRouter.js";
 import type { Task, TaskComplexity } from "../../utils/types.js";
 
 export default class RunCommand extends Command {
@@ -43,7 +45,8 @@ export default class RunCommand extends Command {
       description: "Skip confirmation prompts",
     }),
     model: Flags.string({
-      description: "Force a specific model",
+      description:
+        'Pin every LLM call to one model, as "<provider>/<model>" (e.g. openrouter/nvidia/nemotron-3-ultra-550b-a55b:free)',
     }),
   };
 
@@ -54,6 +57,11 @@ export default class RunCommand extends Command {
 
     if (flags["no-confirm"]) {
       getPermissionSystem().allowAll();
+    }
+
+    if (flags.model) {
+      parsePinnedModel(flags.model); // fail fast on a malformed spec, before any provider work
+      getConfigManager().setConfigValue("defaults.model", flags.model);
     }
 
     // Validate providers are available
@@ -69,7 +77,6 @@ export default class RunCommand extends Command {
       updatedAt: new Date(),
       metadata: {
         mode: flags.mode,
-        forcedModel: flags.model,
         noConfirm: flags["no-confirm"],
       },
     };

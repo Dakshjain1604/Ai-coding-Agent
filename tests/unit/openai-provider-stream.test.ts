@@ -96,7 +96,9 @@ describe("OpenAIProvider — stream()", () => {
     }
     const last = chunks[chunks.length - 1];
     expect(last.done).toBe(true);
-    expect(last.toolCalls).toEqual([{ id: "call_1", name: "search", params: { q: "cats" } }]);
+    expect(last.toolCalls).toEqual([
+      { id: "call_1", name: "search", params: { q: "cats" }, rawArguments: `{"q":"cats"}` },
+    ]);
   });
 
   it("does not send a tools field on the streaming request when no tools are requested", async () => {
