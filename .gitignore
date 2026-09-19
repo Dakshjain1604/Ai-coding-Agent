@@ -470,3 +470,11 @@ swe-bench/
 .codingagent/
 .traces/
 output/
+
+# Terminal-Bench (Harbor) tasks and job outputs
+bench/tasks/
+bench/jobs/
+bench/build/
+
+# Python bytecode from the bench harbor adapter
+bench/**/__pycache__/
