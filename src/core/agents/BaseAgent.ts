@@ -280,6 +280,7 @@ export abstract class BaseAgent {
       preferLocal: defaults.preferLocal,
       fallbackToPaid: defaults.fallbackToPaid,
       maxPaidApiCalls: defaults.maxPaidApiCalls,
+      pinnedModel: defaults.model,
     });
     const taskCategory = this.getTaskCategory();
     // ModelRouter.route()'s `preferQuality` option (-> ProviderRegistry's
