@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolExecutor, timeFooter, validateArguments, type Tool, type ToolContext } from "../../../src/harness/tools/tool.js";
+import {
+  ToolExecutor,
+  normalizeArguments,
+  parseArgumentsJson,
+  timeFooter,
+  validateArguments,
+  type Tool,
+  type ToolContext,
+} from "../../../src/harness/tools/tool.js";
 import type { ToolSpec } from "../../../src/harness/types.js";
 
 const echoSpec: ToolSpec = {
@@ -161,4 +169,105 @@ describe("timeFooter — the model can see its remaining budget", () => {
     const result = await executor.execute(call("echo", { text: "x" }), ctx);
     expect(result.observation.output).toMatch(/\[time: \d+m elapsed, ~\d+m left\]$/);
   });
+
+  it("successfully parses arguments wrapped in markdown code blocks", async () => {
+    const executor = new ToolExecutor([tool(async (args) => ({ ok: true, output: `said ${args.text}` }))]);
+    const fenced = "```json\n" + JSON.stringify({ text: "inside fence" }) + "\n```";
+    const result = await executor.execute(call("echo", fenced), ctx);
+    expect(result.observation.ok).toBe(true);
+    expect(result.observation.output).toContain("said inside fence");
+  });
+
+  it("normalizes and unpacks inlined <arg_key> tags from models", async () => {
+    const editorSpec: ToolSpec = {
+      name: "editor",
+      description: "editor",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", enum: ["view", "create"] },
+          path: { type: "string" },
+          file_text: { type: "string" },
+        },
+        required: ["command", "path"],
+      },
+    };
+    const executor = new ToolExecutor([
+      tool(async (args) => ({ ok: true, output: `${args.command} ${args.path}: ${args.file_text}` }), editorSpec),
+    ]);
+
+    // Live model failure shape from largest-eigenval benchmark:
+    const leaked = JSON.stringify({
+      command: "create<arg_key>path</arg_key><arg_value>/app/test.py</arg_value>",
+      file_text: "content",
+    });
+    const result = await executor.execute(call("editor", leaked), ctx);
+    expect(result.observation.ok).toBe(true);
+    expect(result.observation.output).toContain("create /app/test.py: content");
+  });
 });
+
+describe("parseArgumentsJson", () => {
+  it("parses ordinary valid JSON", () => {
+    expect(parseArgumentsJson('{"a": 1, "b": "text"}')).toEqual({ a: 1, b: "text" });
+  });
+
+  it("handles empty or whitespace string as empty object", () => {
+    expect(parseArgumentsJson("")).toEqual({});
+    expect(parseArgumentsJson("   \n\t  ")).toEqual({});
+  });
+
+  it("strips ```json ... ``` code fences", () => {
+    expect(parseArgumentsJson("```json\n{\"command\": \"cat foo\"}\n```")).toEqual({ command: "cat foo" });
+    expect(parseArgumentsJson("```\n{\"command\": \"cat foo\"}\n```")).toEqual({ command: "cat foo" });
+  });
+
+  it("extracts JSON object when surrounded by model chatter", () => {
+    expect(parseArgumentsJson("Here is the call: {\"command\": \"ls\"} hope this helps!")).toEqual({ command: "ls" });
+  });
+
+  it("throws on completely invalid syntax", () => {
+    expect(() => parseArgumentsJson("definitely not json")).toThrow();
+  });
+});
+
+describe("normalizeArguments", () => {
+  it("passes clean arguments through unmodified", () => {
+    const input = { command: "create", path: "/app/main.py", file_text: "hello" };
+    expect(normalizeArguments(input)).toEqual(input);
+  });
+
+  it("unpacks inlined <arg_key> tags from string values", () => {
+    const input = {
+      command: "create<arg_key>path</arg_key><arg_value>/app/eigen.py</arg_value>",
+      file_text: "import numpy as np",
+    };
+    expect(normalizeArguments(input)).toEqual({
+      command: "create",
+      path: "/app/eigen.py",
+      file_text: "import numpy as np",
+    });
+  });
+
+  it("unpacks multiple sequential tags within a single value", () => {
+    const input = {
+      command: "create<arg_key>path</arg_key><arg_value>/app/a.py</arg_value><arg_key>file_text</arg_key><arg_value>x = 1</arg_value>",
+    };
+    expect(normalizeArguments(input)).toEqual({
+      command: "create",
+      path: "/app/a.py",
+      file_text: "x = 1",
+    });
+  });
+
+  it("handles unclosed trailing <arg_value> tag gracefully", () => {
+    const input = {
+      command: "create<arg_key>path</arg_key><arg_value>/app/b.py",
+    };
+    expect(normalizeArguments(input)).toEqual({
+      command: "create",
+      path: "/app/b.py",
+    });
+  });
+});
+

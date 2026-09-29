@@ -10,8 +10,11 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { normalizeArguments, parseArgumentsJson } from "../../providers/openai-stream-tools.js";
 import { scrubSecrets } from "../../utils/secret-scrubber.js";
 import type { JsonSchemaProperty, ToolCallRecord, ToolSpec } from "../types.js";
+
+export { normalizeArguments, parseArgumentsJson } from "../../providers/openai-stream-tools.js";
 
 export interface ToolContext {
   /** Current working directory of the agent's shell session. */
@@ -87,20 +90,21 @@ export class ToolExecutor {
       };
     }
 
-    let args: unknown;
+    let rawArgs: unknown;
     try {
-      args = call.arguments.trim() === "" ? {} : JSON.parse(call.arguments);
+      rawArgs = parseArgumentsJson(call.arguments);
     } catch (error) {
       return {
         ok: false,
         output: `Error: arguments for ${call.name} are not valid JSON (${(error as Error).message}). Received: ${call.arguments.slice(0, 500)}`,
       };
     }
-    if (typeof args !== "object" || args === null || Array.isArray(args)) {
+    if (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs)) {
       return { ok: false, output: `Error: arguments for ${call.name} must be a JSON object.` };
     }
 
-    const problems = validateArguments(args as Record<string, unknown>, tool.spec);
+    const args = normalizeArguments(rawArgs as Record<string, unknown>);
+    const problems = validateArguments(args, tool.spec);
     if (problems.length > 0) {
       return {
         ok: false,
@@ -109,7 +113,7 @@ export class ToolExecutor {
     }
 
     try {
-      return await tool.run(args as Record<string, unknown>, ctx);
+      return await tool.run(args, ctx);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, output: `Error: ${call.name} failed unexpectedly: ${message}` };
