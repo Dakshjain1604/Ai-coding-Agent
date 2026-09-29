@@ -41,6 +41,10 @@ export default class ExecCommand extends Command {
       options: [...REASONING_EFFORTS],
       description: "OpenRouter reasoning effort for models that support it (default: the model's own default).",
     }),
+    "reasoning-max-tokens": Flags.integer({
+      min: 0,
+      description: "Cap on reasoning tokens for models that support reasoning (default: 2048).",
+    }),
     cwd: Flags.string({ description: "Working directory for the task (default: current directory)." }),
     "logs-dir": Flags.string({ description: "Directory for trajectory.jsonl, result.json and harness scratch files." }),
     "max-turns": Flags.integer({ default: 150, min: 1, description: "Maximum model turns." }),
@@ -79,6 +83,7 @@ export default class ExecCommand extends Command {
         maxOutputTokens: flags["max-output-tokens"],
         contextWindow: flags["context-window"],
         reasoningEffort: flags["reasoning-effort"] as ReasoningEffort | undefined,
+        reasoningMaxTokens: flags["reasoning-max-tokens"],
         progress: flags.quiet ? undefined : (line) => process.stderr.write(line + "\n"),
       });
       status = result.status;

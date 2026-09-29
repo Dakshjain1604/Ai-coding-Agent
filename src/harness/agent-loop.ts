@@ -281,8 +281,12 @@ export async function runAgent(options: AgentLoopOptions): Promise<RunResult> {
       // A reply without tool calls ends the run — unless it is not a real
       // answer: output cut off by the token limit, or no content at all.
       if (reply.finishReason === "length") {
+        const feedback =
+          assistant.content.trim() === ""
+            ? "Your previous response hit the output token limit without generating text or tool calls (e.g. all tokens spent in reasoning). Do not perform long internal thinking; immediately output your action or tool call."
+            : "Your previous response hit the output token limit and was cut off. Continue from where it stopped; keep individual responses and tool arguments shorter.";
         const stop = recordUnproductiveTurn(
-          "Your previous response hit the output token limit and was cut off. Continue from where it stopped; keep individual responses and tool arguments shorter.",
+          feedback,
           "output truncated by length limit; asked model to continue",
         );
         if (stop) return stop;

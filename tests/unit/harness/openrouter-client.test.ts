@@ -137,6 +137,18 @@ describe("OpenRouterClient — request", () => {
     await model.complete(conversation, [], opts);
     expect(create.mock.calls[0][0].reasoning).toEqual({ effort: "high" });
   });
+
+  it("sends reasoning max_tokens when configured", async () => {
+    const { model, create } = makeClient([textChunks], { reasoningMaxTokens: 2048 });
+    await model.complete(conversation, [], opts);
+    expect(create.mock.calls[0][0].reasoning).toEqual({ max_tokens: 2048 });
+  });
+
+  it("prioritizes reasoning effort over reasoning max_tokens if both are configured", async () => {
+    const { model, create } = makeClient([textChunks], { reasoningEffort: "low", reasoningMaxTokens: 2048 });
+    await model.complete(conversation, [], opts);
+    expect(create.mock.calls[0][0].reasoning).toEqual({ effort: "low" });
+  });
 });
 
 describe("OpenRouterClient — stream parsing", () => {

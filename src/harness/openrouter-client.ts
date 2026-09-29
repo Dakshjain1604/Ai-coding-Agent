@@ -68,7 +68,7 @@ function deadlineError(elapsedMs: number): ModelError {
 /** See the file header: failures fixed by changing the conversation, never by resending it. */
 const CONVERSATION_LEVEL_FAILURES = new Set(["invalid_model_output", "context_overflow"]);
 
-export const REASONING_EFFORTS = ["minimal", "low", "medium", "high"] as const;
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const;
 export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
 export interface OpenRouterClientOptions {
@@ -81,6 +81,8 @@ export interface OpenRouterClientOptions {
   limits?: Partial<ModelLimits>;
   /** Sent as OpenRouter's `reasoning.effort` when set; the model default otherwise. */
   reasoningEffort?: ReasoningEffort;
+  /** Sent as OpenRouter's `reasoning.max_tokens` when set (mutually exclusive with reasoningEffort). */
+  reasoningMaxTokens?: number;
   /** Injected for tests. */
   client?: Pick<OpenAI, "chat">;
   sleep?: (ms: number) => Promise<void>;
@@ -109,6 +111,7 @@ export class OpenRouterClient implements ChatModel {
   private readonly maxAttempts: number;
   private readonly idleTimeoutMs: number;
   private readonly reasoningEffort?: ReasoningEffort;
+  private readonly reasoningMaxTokens?: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => number;
   private readonly fetchModelMetadata: (model: string) => Promise<Partial<ModelLimits> | undefined>;
@@ -121,6 +124,7 @@ export class OpenRouterClient implements ChatModel {
     this.maxAttempts = options.maxAttempts ?? 6;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 180_000;
     this.reasoningEffort = options.reasoningEffort;
+    this.reasoningMaxTokens = options.reasoningMaxTokens;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.now = options.now ?? Date.now;
     this.limitOverrides = options.limits ?? {};
@@ -201,7 +205,11 @@ export class OpenRouterClient implements ChatModel {
       }));
       body.tool_choice = "auto";
     }
-    if (this.reasoningEffort) body.reasoning = { effort: this.reasoningEffort };
+    if (this.reasoningEffort) {
+      body.reasoning = { effort: this.reasoningEffort };
+    } else if (this.reasoningMaxTokens !== undefined) {
+      body.reasoning = { max_tokens: this.reasoningMaxTokens };
+    }
     return body;
   }
 

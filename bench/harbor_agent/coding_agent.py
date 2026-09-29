@@ -46,12 +46,14 @@ class CodingAgent(BaseInstalledAgent):
         *args,
         timeout_sec: int | str | None = None,
         reasoning_effort: str | None = None,
+        reasoning_max_tokens: int | str | None = None,
         max_turns: int | str | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._explicit_timeout_sec = int(timeout_sec) if timeout_sec is not None else None
         self._reasoning_effort = reasoning_effort
+        self._reasoning_max_tokens = int(reasoning_max_tokens) if reasoning_max_tokens is not None else None
         self._max_turns = int(max_turns) if max_turns is not None else None
 
     @staticmethod
@@ -91,6 +93,8 @@ class CodingAgent(BaseInstalledAgent):
         args = ""
         if self._reasoning_effort:
             args += f" --reasoning-effort {shlex.quote(self._reasoning_effort)}"
+        if self._reasoning_max_tokens is not None:
+            args += f" --reasoning-max-tokens {self._reasoning_max_tokens}"
         if self._max_turns is not None:
             args += f" --max-turns {self._max_turns}"
         return args

@@ -22,6 +22,7 @@ export interface HarnessRunOptions {
   /** "openrouter/<model id>". */
   modelSpec: string;
   reasoningEffort?: ReasoningEffort;
+  reasoningMaxTokens?: number;
   cwd: string;
   logsDir: string;
   maxTurns: number;
@@ -34,11 +35,18 @@ export interface HarnessRunOptions {
   model?: ChatModel;
 }
 
+export const DEFAULT_REASONING_MAX_TOKENS = 2048;
+
 export async function runHarness(options: HarnessRunOptions): Promise<RunResult> {
   mkdirSync(options.logsDir, { recursive: true });
   const scratchDir = join(options.logsDir, "scratch");
   const startedAt = Date.now();
   const deadline = startedAt + options.timeoutSec * 1000;
+
+  const reasoningMaxTokens =
+    options.reasoningMaxTokens !== undefined
+      ? (options.reasoningMaxTokens > 0 ? options.reasoningMaxTokens : undefined)
+      : (options.reasoningEffort ? undefined : DEFAULT_REASONING_MAX_TOKENS);
 
   const client =
     options.model ??
@@ -46,6 +54,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<RunResult>
       spec: options.modelSpec,
       limits: options.contextWindow ? { contextWindow: options.contextWindow } : undefined,
       reasoningEffort: options.reasoningEffort,
+      reasoningMaxTokens,
     });
   // The model's API key must never be readable by commands the model runs.
   const hiddenEnv = client instanceof OpenRouterClient ? [client.apiKeyEnv] : [];
