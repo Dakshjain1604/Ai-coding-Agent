@@ -10,7 +10,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runAgent, type RunResult } from "./agent-loop.js";
 import { OpenRouterClient, type ReasoningEffort } from "./openrouter-client.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { buildSystemPrompt, scanDirectory } from "./prompt.js";
 import { BashTool } from "./tools/bash.js";
 import { EditorTool } from "./tools/editor.js";
 import { ToolExecutor } from "./tools/tool.js";
@@ -54,6 +54,8 @@ export async function runHarness(options: HarnessRunOptions): Promise<RunResult>
   const executor = new ToolExecutor([bash, new EditorTool()]);
   const trajectory = new JsonlTrajectory(join(options.logsDir, "trajectory.jsonl"), options.progress);
 
+  const initialListing = scanDirectory(options.cwd);
+
   const result = await runAgent({
     model: client,
     tools: executor,
@@ -64,6 +66,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<RunResult>
       shell: process.env.SHELL ?? "bash",
       date: new Date().toISOString().slice(0, 10),
       timeBudgetSec: options.timeoutSec,
+      initialListing,
     }),
     instruction: options.instruction,
     maxTurns: options.maxTurns,

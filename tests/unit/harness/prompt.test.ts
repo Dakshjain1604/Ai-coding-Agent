@@ -5,7 +5,10 @@
  * run traces, not the wording around them.
  */
 import { describe, expect, it } from "vitest";
-import { buildSystemPrompt } from "../../../src/harness/prompt.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { buildSystemPrompt, scanDirectory } from "../../../src/harness/prompt.js";
 
 const env = {
   cwd: "/app",
@@ -30,6 +33,16 @@ describe("buildSystemPrompt — environment facts", () => {
   it("omits the time budget line when there is none", () => {
     expect(buildSystemPrompt(env)).not.toContain("minutes of wall-clock time");
   });
+
+  it("includes initial directory contents when provided", () => {
+    const prompt = buildSystemPrompt({ ...env, initialListing: "src/\n  index.ts\npackage.json" });
+    expect(prompt).toContain("- Initial directory contents:\n```\nsrc/\n  index.ts\npackage.json\n```");
+  });
+
+  it("omits directory contents when initialListing is absent", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).not.toContain("Initial directory contents");
+  });
 });
 
 describe("buildSystemPrompt — working method", () => {
@@ -37,8 +50,30 @@ describe("buildSystemPrompt — working method", () => {
     expect(buildSystemPrompt(env)).toMatch(/No human is available/i);
   });
 
+  /**
+   * From the llm-inference-batching-scheduler and regex-log traces:
+   * Models generated 13k+ completion tokens of mathematical analysis across 180s,
+   * starving the run of wall-clock time.
+   */
+  it("requires concise and action-oriented reasoning", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/concise and action-oriented/i);
+    expect(prompt).toMatch(/Do not output lengthy speculative essays/i);
+  });
+
   it("requires acting in the environment rather than describing changes", () => {
     expect(buildSystemPrompt(env)).toMatch(/Do not describe changes you could make yourself/i);
+  });
+
+  /**
+   * From llm-inference-batching-scheduler and portfolio-optimization traces:
+   * O(N^2) loops on large batches under emulation timed out after 53s.
+   */
+  it("requires execution efficiency under resource limits or emulation", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/Execution efficiency.*emulation/i);
+    expect(prompt).toMatch(/Prefer efficient operations.*vectorized/i);
+    expect(prompt).toMatch(/Keep existing passing deliverables intact/i);
   });
 
   it("requires verifying against each requirement", () => {
@@ -105,5 +140,57 @@ describe("buildSystemPrompt — tool semantics the model cannot infer", () => {
 
   it("points at the editor for edits to existing files", () => {
     expect(buildSystemPrompt(env)).toMatch(/Prefer it over shell redirection or sed/i);
+  });
+});
+
+describe("scanDirectory", () => {
+  it("returns undefined for a non-existent directory", () => {
+    expect(scanDirectory("/tmp/nonexistent-path-for-testing-12345")).toBeUndefined();
+  });
+
+  it("returns '(empty directory)' for an empty directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "scandir-empty-"));
+    try {
+      expect(scanDirectory(dir)).toBe("(empty directory)");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists directory tree with indentation, skipping ignored directories", () => {
+    const dir = mkdtempSync(join(tmpdir(), "scandir-test-"));
+    try {
+      mkdirSync(join(dir, "src"));
+      mkdirSync(join(dir, "node_modules"));
+      mkdirSync(join(dir, ".git"));
+      writeFileSync(join(dir, "src", "index.ts"), "");
+      writeFileSync(join(dir, "package.json"), "");
+      writeFileSync(join(dir, "node_modules", "package.json"), "");
+      writeFileSync(join(dir, ".git", "config"), "");
+
+      const listing = scanDirectory(dir);
+      expect(listing).toContain("src/");
+      expect(listing).toContain("  index.ts");
+      expect(listing).toContain("package.json");
+      expect(listing).not.toContain("node_modules");
+      expect(listing).not.toContain(".git");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates entries when maxEntries is exceeded", () => {
+    const dir = mkdtempSync(join(tmpdir(), "scandir-trunc-"));
+    try {
+      for (let i = 0; i < 10; i++) {
+        writeFileSync(join(dir, `file-${i}.txt`), "");
+      }
+      const listing = scanDirectory(dir, { maxEntries: 4 });
+      expect(listing).toContain("... (remaining entries omitted)");
+      const lines = listing?.split("\n") ?? [];
+      expect(lines.length).toBe(5); // 4 entries + 1 truncation line
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
