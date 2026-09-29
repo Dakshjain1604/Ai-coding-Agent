@@ -170,6 +170,15 @@ describe("BashTool — never hangs", () => {
     expect(obs.meta?.timeoutSec).toBeLessThanOrEqual(2);
   });
 
+  it("accepts timeout as an alias for timeout_sec", async () => {
+    const started = Date.now();
+    const obs = await run("echo started; sleep 30", { timeout: 1 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(obs.ok).toBe(false);
+    expect(obs.meta?.timedOut).toBe(true);
+    expect(obs.output).toContain("timed out after 1s");
+  });
+
   it("closes stdin so a command waiting for input fails fast", async () => {
     const started = Date.now();
     const obs = await run("read answer; echo got=[$answer]", { timeout_sec: 20 });

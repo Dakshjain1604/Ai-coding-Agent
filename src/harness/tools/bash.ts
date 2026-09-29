@@ -63,6 +63,10 @@ export class BashTool implements Tool {
           type: "integer" as const,
           description: `Seconds before the command is killed (default ${DEFAULT_TIMEOUT_SEC}, max ${MAX_TIMEOUT_SEC}).`,
         },
+        timeout: {
+          type: "integer" as const,
+          description: `Alias for timeout_sec.`,
+        },
       },
       required: ["command"],
     },
@@ -94,7 +98,7 @@ export class BashTool implements Tool {
   async run(args: Record<string, unknown>, ctx: ToolContext): Promise<Observation> {
     const command = args.command as string;
     const remainingSec = Math.max(1, Math.floor((ctx.deadline - Date.now()) / 1000));
-    const requestedSec = Math.min((args.timeout_sec as number | undefined) ?? DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC);
+    const requestedSec = Math.min((args.timeout_sec as number | undefined) ?? (args.timeout as number | undefined) ?? DEFAULT_TIMEOUT_SEC, MAX_TIMEOUT_SEC);
     const timeoutSec = Math.max(1, Math.min(requestedSec, remainingSec));
 
     const n = ++this.commandCount;
