@@ -125,6 +125,25 @@ describe("buildSystemPrompt — working method", () => {
     expect(buildSystemPrompt(env)).toMatch(/ends with the time left in the run/i);
   });
 
+  it("warns against destructive cleanup of verified deliverables", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/Never delete, reset, or undo verified deliverables/i);
+    expect(prompt).toMatch(/checkers evaluate the environment immediately after you finish/i);
+  });
+
+  it("guides background service and network credential configuration", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/Services and network configuration/i);
+    expect(prompt).toMatch(/PasswordAuthentication yes/i);
+    expect(prompt).toMatch(/git.*for git servers/i);
+  });
+
+  it("guides installing packages via package manager over huge from-source compilations", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/install it via the system package manager/i);
+    expect(prompt).toMatch(/avoid lengthy from-source compilations/i);
+  });
+
   it("explains how the run ends, so a reply without a tool call is deliberate", () => {
     expect(buildSystemPrompt(env)).toMatch(/Replying without a tool call ends the task/i);
   });

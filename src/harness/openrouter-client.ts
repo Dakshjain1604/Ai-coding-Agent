@@ -33,7 +33,11 @@
  */
 
 import OpenAI from "openai";
-import { accumulateOpenAIToolCallDeltas } from "../providers/openai-stream-tools.js";
+import {
+  accumulateOpenAIToolCallDeltas,
+  normalizeArguments,
+  parseArgumentsJson,
+} from "../providers/openai-stream-tools.js";
 import { classifyFailure } from "../core/agents/failure-classifier.js";
 import {
   ModelError,
@@ -292,7 +296,10 @@ export class OpenRouterClient implements ChatModel {
     const calls = (toolCalls.finalize() ?? []).map((call, index) => ({
       id: call.id ?? `call_${started}_${index}`,
       name: call.name,
-      arguments: call.rawArguments ?? JSON.stringify(call.params),
+      arguments:
+        call.params && Object.keys(call.params).length > 0
+          ? JSON.stringify(call.params)
+          : (call.rawArguments ?? "{}"),
     }));
     if (calls.length > 0 && finishReason === "unknown") finishReason = "tool_calls";
 
@@ -422,8 +429,11 @@ export function toWireMessages(messages: Message[]): Record<string, unknown>[] {
 
 function validJsonOrWrapped(args: string): string {
   try {
-    JSON.parse(args);
-    return args;
+    const parsed = parseArgumentsJson(args);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return JSON.stringify(normalizeArguments(parsed as Record<string, unknown>));
+    }
+    return JSON.stringify(parsed);
   } catch {
     return JSON.stringify({ invalid_arguments: args });
   }

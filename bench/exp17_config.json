@@ -1,0 +1,23 @@
+{
+    "job_name": "exp17-hard-batch",
+    "n_concurrent_trials": 1,
+    "agents": [
+        {
+            "name": "harbor_agent.coding_agent:CodingAgent",
+            "model_name": "openrouter/~z-ai/glm-flash-latest",
+            "kwargs": {
+                "max_turns": 30
+            }
+        }
+    ],
+    "datasets": [
+        {
+            "path": "tasks",
+            "task_names": [
+                "configure-git-webserver",
+                "password-recovery",
+                "sparql-university"
+            ]
+        }
+    ]
+}

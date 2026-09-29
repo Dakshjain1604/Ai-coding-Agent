@@ -76,6 +76,36 @@ describe("toWireMessages", () => {
     expect(wire[3]).toEqual({ role: "tool", tool_call_id: "c1", content: "[exit code 0]" });
     expect(wire[5]).toEqual({ role: "assistant", content: "done" });
   });
+
+  it("normalizes leaked XML tags and markdown fences in wire message tool arguments", () => {
+    const rawTranscript: Message[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [
+          {
+            id: "c1",
+            name: "editor",
+            arguments: '{"command":"create<arg_key>path</arg_key><arg_value>/app/main.py</arg_value>"}',
+          },
+          {
+            id: "c2",
+            name: "bash",
+            arguments: '```json\n{"command":"pwd"}\n```',
+          },
+        ],
+      },
+    ];
+    const wire = toWireMessages(rawTranscript);
+    expect(wire[0]).toEqual({
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        { id: "c1", type: "function", function: { name: "editor", arguments: '{"command":"create","path":"/app/main.py"}' } },
+        { id: "c2", type: "function", function: { name: "bash", arguments: '{"command":"pwd"}' } },
+      ],
+    });
+  });
 });
 
 describe("parseModelSpec", () => {
