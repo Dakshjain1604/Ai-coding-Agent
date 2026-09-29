@@ -152,6 +152,7 @@ export class BashTool implements Tool {
     const q = shellQuote;
     return [
       `exec > ${q(outputFile)} 2>&1 < /dev/null`,
+      `export PYTHONUNBUFFERED=1`,
       `__save_state() {`,
       `  __ec=$?`,
       `  { printf "cd '%s'\\n" "$(pwd | sed "s/'/'\\\\\\\\''/g")"; export -p | awk ${q(EXPORT_FILTER_AWK)}; } > ${q(this.stateFile + ".tmp")} 2>/dev/null && mv ${q(this.stateFile + ".tmp")} ${q(this.stateFile)} && : > ${q(stateSavedMarker)}`,

@@ -155,12 +155,17 @@ export async function runAgent(options: AgentLoopOptions): Promise<RunResult> {
     for (const t of TIME_CHECK_THRESHOLDS) if (t >= threshold) timeChecksSent.add(t);
 
     const remainingMin = Math.max(0, Math.round((options.deadline - Date.now()) / 60_000));
+    const urgency =
+      threshold <= 0.1
+        ? "CRITICAL: Time is almost exhausted. If your deliverables are in place, stop running sleep loops or open-ended tests. Confirm the deliverable directory holds only the requested files and finish now with a summary."
+        : threshold <= 0.25
+          ? "URGENT: Time is running low. If deliverables are already built and basic verification passed, do NOT spend time on long benchmarks or background polling; finalize and finish. If anything is missing, create the minimal working version immediately."
+          : "Decide now: is every artifact the task asked for actually in place and working? If not, build the simplest version that satisfies the stated requirements and verify it. Leave further investigation and refinements for whatever time is left after that.";
+
     messages.push({
       role: "user",
       content:
-        `[Time check] About ${remainingMin} minute(s) of the run remain. When the time is up the run stops where it is, and anything unfinished scores nothing. ` +
-        `Decide now: is every artifact the task asked for actually in place and working? If not, build the simplest version that satisfies the stated requirements and verify it. ` +
-        `Leave further investigation and refinements for whatever time is left after that.`,
+        `[Time check] About ${remainingMin} minute(s) of the run remain. When the time is up the run stops where it is, and anything unfinished scores nothing. ${urgency}`,
     });
     trajectory.record({ type: "notice", turn: turns, message: `time check sent at ${Math.round(threshold * 100)}% remaining` });
   };

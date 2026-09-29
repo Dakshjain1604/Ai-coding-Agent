@@ -76,6 +76,12 @@ describe("BashTool — session state", () => {
     expect((await run("echo \"$GREETING\"")).output).toContain("hello world");
   });
 
+  it("exports PYTHONUNBUFFERED=1 by default so Python output is never block-buffered", async () => {
+    const obs = await run("echo PYTHONUNBUFFERED=$PYTHONUNBUFFERED");
+    expect(obs.ok).toBe(true);
+    expect(obs.output).toContain("PYTHONUNBUFFERED=1");
+  });
+
   it("persists state even when the command calls exit", async () => {
     await run("cd /tmp && export MARK=1 && exit 4");
     const obs = await run("pwd; echo MARK=$MARK");

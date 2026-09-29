@@ -309,6 +309,10 @@ describe("runAgent — time checks", () => {
     expect(sent).toHaveLength(3);
     expect(sent[0].content).toMatch(/minute\(s\) of the run remain/);
     expect(sent[0].content).toMatch(/is every artifact the task asked for actually in place/i);
+    expect(sent[1].content).toMatch(/URGENT: Time is running low/i);
+    expect(sent[1].content).toMatch(/do NOT spend time on long benchmarks/i);
+    expect(sent[2].content).toMatch(/CRITICAL: Time is almost exhausted/i);
+    expect(sent[2].content).toMatch(/stop running sleep loops/i);
   });
 
   it("sends no time check while plenty of time remains", async () => {
