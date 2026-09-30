@@ -216,6 +216,13 @@ describe("buildSystemPrompt — working method", () => {
     expect(prompt).toMatch(/C\/C\+\+ block comments terminate at the very first/i);
   });
 
+  it("guides single file deliverable directory cleanliness without leftover compiled binaries", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/single file in a directory/i);
+    expect(prompt).toMatch(/never leave test binaries or compiled executables in that directory/i);
+    expect(prompt).toMatch(/os\.listdir\(dir\) == \['file\.ext'\]/i);
+  });
+
   it("explains how the run ends, so a reply without a tool call is deliberate", () => {
     expect(buildSystemPrompt(env)).toMatch(/Replying without a tool call ends the task/i);
   });
