@@ -219,9 +219,9 @@ export class HuggingFaceProvider extends BaseProvider {
   }
 
   estimateCost(
-    inputTokens: number,
-    outputTokens: number,
-    model: string,
+    _inputTokens: number,
+    _outputTokens: number,
+    _model: string,
   ): number {
     return 0;
   }

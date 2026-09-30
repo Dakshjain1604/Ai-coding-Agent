@@ -281,7 +281,7 @@ export class OpenRouterProvider extends BaseProvider {
     }
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(_text: string): Promise<number[]> {
     // OpenRouter supports embeddings through their API
     throw new ProviderError(
       "Use provider-specific embedding API",

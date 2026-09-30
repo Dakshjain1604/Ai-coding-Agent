@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { HookManager } from "../../src/hooks/HookManager.js";
-import type { Hook, HookContext } from "../../src/hooks/types.js";
+import type { Hook } from "../../src/hooks/types.js";
 
 describe("HookManager", () => {
   let manager: HookManager;

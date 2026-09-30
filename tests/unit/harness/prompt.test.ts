@@ -125,23 +125,95 @@ describe("buildSystemPrompt — working method", () => {
     expect(buildSystemPrompt(env)).toMatch(/ends with the time left in the run/i);
   });
 
-  it("warns against destructive cleanup of verified deliverables", () => {
+  it("warns against destructive cleanup of verified deliverables and example fixtures", () => {
     const prompt = buildSystemPrompt(env);
-    expect(prompt).toMatch(/Never delete, reset, or undo verified deliverables/i);
+    expect(prompt).toMatch(/Keep all requested example files, branches, and commits permanently in place/i);
+    expect(prompt).toMatch(/never delete them, reset repository branches, or wipe web roots/i);
     expect(prompt).toMatch(/checkers evaluate the environment immediately after you finish/i);
   });
 
-  it("guides background service and network credential configuration", () => {
+  it("guides background service, permissions, and network credential configuration", () => {
     const prompt = buildSystemPrompt(env);
     expect(prompt).toMatch(/Services and network configuration/i);
     expect(prompt).toMatch(/PasswordAuthentication yes/i);
-    expect(prompt).toMatch(/git.*for git servers/i);
+    expect(prompt).toMatch(/useradd.*\/bin\/bash git/i);
+    expect(prompt).toMatch(/permissive read\/write permissions/i);
   });
 
   it("guides installing packages via package manager over huge from-source compilations", () => {
     const prompt = buildSystemPrompt(env);
     expect(prompt).toMatch(/install it via the system package manager/i);
     expect(prompt).toMatch(/avoid lengthy from-source compilations/i);
+  });
+
+  it("instructs signature fidelity and async def coroutine adherence", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/Pay strict attention to function and class signatures/i);
+    expect(prompt).toMatch(/async def.*coroutine function that callers await/i);
+  });
+
+  it("guides dataflow debugging over environment/bytecode blame", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/trace the actual data flow and argument handling through the call stack/i);
+    expect(prompt).toMatch(/rather than assuming bytecode or runtime caching issues/i);
+  });
+
+  it("instructs graph edge column semantics and causal intervention edge removal", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/from.*is always the directed edge source\/parent.*to.*is always the destination\/child/i);
+    expect(prompt).toMatch(/map column `from` to parent and `to` to child explicitly/i);
+    expect(prompt).toMatch(/causal models or DAG interventions.*severs all incoming directed edges/i);
+  });
+
+  it("guides digital forensics raw block carving for deleted files", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/recovering deleted files.*digital forensics/i);
+    expect(prompt).toMatch(/scan the raw filesystem\/unallocated blocks directly/i);
+  });
+
+  it("guides git post-receive hook deployment for web push-to-deploy", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/git push-to-deploy to a web directory/i);
+    expect(prompt).toMatch(/hooks\/post-receive/i);
+    expect(prompt).toMatch(/git --work-tree=<webroot> --git-dir=<repo> checkout -f master/i);
+  });
+
+  it("guides multi-criteria filter independence without artificial coupling", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/multiple numbered criteria/i);
+    expect(prompt).toMatch(/evaluate each numbered criterion independently/i);
+    expect(prompt).toMatch(/Do not conflate separate criteria/i);
+  });
+
+  it("guides logic circuit gate synthesis with feedforward combinational designs", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/synthesizing Boolean logic circuits/i);
+    expect(prompt).toMatch(/prefer feedforward combinational circuits/i);
+    expect(prompt).toMatch(/constant comparators.*interval selectors/i);
+    expect(prompt).toMatch(/easily fit within standard gate budgets/i);
+  });
+
+  it("guides Golden Gate assembly primer structure without placeholder letters", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/molecular biology or cloning primers/i);
+    expect(prompt).toMatch(/Golden Gate assembly with Type IIS enzymes/i);
+    expect(prompt).toMatch(/concrete nucleotide bases.*never placeholder or wildcard letters like N/i);
+    expect(prompt).toMatch(/5' clamp.*recognition site.*cleavage spacer.*sticky overhang.*template-annealing region/i);
+  });
+
+  it("guides early budget compliance before turn limits are reached", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/optimizing code or data against hard size or performance targets/i);
+    expect(prompt).toMatch(/achieve a compliant deliverable early with reliable, direct algorithms/i);
+    expect(prompt).toMatch(/saved before turn or time limits are reached/i);
+    expect(prompt).toMatch(/LZ77.*entropy compression.*matches carry significant.*overhead/i);
+  });
+
+  it("guides Rust and C/C++ polyglot block comment nesting syntax differences", () => {
+    const prompt = buildSystemPrompt(env);
+    expect(prompt).toMatch(/writing polyglots across languages/i);
+    expect(prompt).toMatch(/Rust supports nested block comments/i);
+    expect(prompt).toMatch(/C\/C\+\+ block comments terminate at the very first/i);
   });
 
   it("explains how the run ends, so a reply without a tool call is deliberate", () => {

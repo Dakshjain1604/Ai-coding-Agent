@@ -139,7 +139,7 @@ export abstract class BaseProvider {
    * Get default model for a task type
    */
   async getDefaultModel(
-    taskType: "simple" | "code" | "complex",
+    _taskType: "simple" | "code" | "complex",
   ): Promise<string> {
     const models = await this.getModels();
     if (models.length === 0) {

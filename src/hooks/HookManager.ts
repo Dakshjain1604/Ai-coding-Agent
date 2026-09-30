@@ -58,7 +58,7 @@ export class HookManager {
   }
 
   unregister(name: string): boolean {
-    for (const [event, hooks] of this.hooks) {
+    for (const hooks of this.hooks.values()) {
       const index = hooks.findIndex((h) => h.name === name);
       if (index !== -1) {
         hooks.splice(index, 1);

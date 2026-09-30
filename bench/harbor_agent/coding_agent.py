@@ -30,6 +30,22 @@ INSTALL_ROOT = "/installed-agent"
 AGENT_DIR = f"{INSTALL_ROOT}/coding-agent"
 NODE_BIN = f"{INSTALL_ROOT}/node/bin/node"
 
+def _ensure_env() -> None:
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    env_file = repo_root / ".env"
+    if env_file.exists():
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("'\"")
+                    if k not in os.environ:
+                        os.environ[k] = v
+
+_ensure_env()
+
 # Only the model credential is forwarded into the container — never the host env.
 FORWARDED_ENV_KEYS = ("OPENROUTER_API_KEY",)
 

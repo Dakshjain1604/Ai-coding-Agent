@@ -419,6 +419,42 @@ describe("OpenRouterClient — the run deadline bounds a call in flight", () => 
     const turn = await model.complete(conversation, [], { ...opts, deadline: Date.now() + 600_000 });
     expect(turn.message.content).toBe("Hello");
   });
+
+  it("aborts a single call that exceeds requestTimeoutMs even when deadline is far away, and retries it", async () => {
+    let clock = 1_000_000;
+    const { model, create } = makeClient(
+      [
+        [
+          { choices: [{ delta: { content: "part1" } }] },
+          { choices: [{ delta: { content: "part2" } }] },
+        ],
+        textChunks,
+      ],
+      {
+        now: () => clock,
+        requestTimeoutMs: 60_000,
+      },
+    );
+    const deadline = clock + 3_600_000; // 1 hour away
+    const original = create.getMockImplementation()!;
+    let callIndex = 0;
+    create.mockImplementation(async (body, options) => {
+      const iterable = await original(body, options);
+      const currentCall = callIndex++;
+      return (async function* () {
+        for await (const chunk of iterable as AsyncIterable<Chunk>) {
+          if (currentCall === 0) {
+            clock += 120_000; // exceeds requestTimeoutMs (60s)
+          }
+          yield chunk;
+        }
+      })();
+    });
+
+    const turn = await model.complete(conversation, [], { ...opts, deadline });
+    expect(turn.message.content).toBe("Hello");
+    expect(create).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("OpenRouterClient — limits", () => {

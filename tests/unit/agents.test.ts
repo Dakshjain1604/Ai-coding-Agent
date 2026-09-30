@@ -37,7 +37,7 @@ describe("UniversalAgent & Mode Management", () => {
   });
 
   it("should register workspace_verify across all tool sets", () => {
-    for (const [mode, tools] of Object.entries(TOOL_SETS)) {
+    for (const tools of Object.values(TOOL_SETS)) {
       expect(tools).toContain("workspace_verify");
     }
   });

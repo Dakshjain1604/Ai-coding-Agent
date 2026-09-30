@@ -12,22 +12,31 @@
 const KEY_VALUE_PATTERN =
   /\b([A-Za-z][A-Za-z0-9_-]*)\s*[:=]\s*['"]?([\w.\-+/]{8,})['"]?/g;
 
-// A key name counts as sensitive if one of its underscore/camelCase-split
-// parts matches one of these terms exactly — this avoids false positives
-// like "keyword" or "monkey" while still catching compound names like
-// AWS_SECRET_ACCESS_KEY or apiToken.
-const SENSITIVE_KEY_PARTS = new Set([
-  "key",
+// Non-sensitive key qualifiers commonly encountered in dev/data/schemas/crypto
+const NON_SENSITIVE_PARTS = new Set([
+  "public",
+  "foreign",
+  "primary",
+  "cache",
+  "sort",
+  "partition",
+  "search",
+  "routing",
+]);
+
+// Single terms that definitively denote credentials or API secrets
+const SENSITIVE_TERMS = new Set([
   "apikey",
-  "token",
   "secret",
-  "password",
-  "passwd",
+  "token",
   "credential",
   "credentials",
 ]);
 
-function isSensitiveKeyName(key: string): boolean {
+// Compound modifiers that denote secret keys when combined with "key"
+const SENSITIVE_KEY_MODIFIERS = new Set(["api", "access", "private", "auth"]);
+
+export function isSensitiveKeyName(key: string): boolean {
   // Split on underscores/hyphens and true camelCase boundaries (lowercase
   // followed by uppercase) — NOT before every capital, which would shred an
   // all-caps identifier like AWS_SECRET_ACCESS_KEY into single letters.
@@ -35,7 +44,20 @@ function isSensitiveKeyName(key: string): boolean {
     .split(/[_-]+|(?<=[a-z])(?=[A-Z])/)
     .map((p) => p.toLowerCase())
     .filter(Boolean);
-  return parts.some((p) => SENSITIVE_KEY_PARTS.has(p));
+
+  if (parts.some((p) => NON_SENSITIVE_PARTS.has(p))) {
+    return false;
+  }
+
+  if (parts.some((p) => SENSITIVE_TERMS.has(p))) {
+    return true;
+  }
+
+  if (parts.includes("key")) {
+    return parts.some((p) => SENSITIVE_KEY_MODIFIERS.has(p));
+  }
+
+  return false;
 }
 
 // Bare secret-shaped tokens with no surrounding key= context.

@@ -659,7 +659,7 @@ export class UniversalAgent extends BaseAgent {
         const taskResult = this.complete(true, lastOutput);
 
         // ---- Telemetry: turn end (success) ----
-        this.finalizeTurn(collector, turnNumber, mode);
+        this.finalizeTurn(collector, turnNumber);
 
         return taskResult;
       } catch (error) {
@@ -683,7 +683,7 @@ export class UniversalAgent extends BaseAgent {
         console.log(chalk.red("  └──────────────────────────────────\n"));
 
         // ---- Telemetry: turn end (error) ----
-        this.finalizeTurn(collector, turnNumber, mode);
+        this.finalizeTurn(collector, turnNumber);
 
         return this.complete(false, `Task failed: ${errorMessage}`);
       }
@@ -771,7 +771,6 @@ export class UniversalAgent extends BaseAgent {
   private finalizeTurn(
     collector: TelemetryCollector,
     turnNumber: number,
-    mode: string,
   ): void {
     try {
       const summary = collector.buildSummary(turnNumber);

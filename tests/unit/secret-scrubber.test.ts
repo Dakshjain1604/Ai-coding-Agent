@@ -53,4 +53,29 @@ describe("scrubSecrets", () => {
   it("passes through empty/falsy input unchanged", () => {
     expect(scrubSecrets("")).toBe("");
   });
+
+  it("does not redact passwords, allowing agents to see recovery targets, test credentials, and configs", () => {
+    const text = "PASSWORD=8XDP5Q2RT9ZK7VB3BV4WW54";
+    expect(scrubSecrets(text)).toBe(text);
+
+    const text2 = "password: supersecretpassword123";
+    expect(scrubSecrets(text2)).toBe(text2);
+  });
+
+  it("does not redact schema or database key names like foreign_key, primary_key, cache_key", () => {
+    expect(scrubSecrets("foreign_key=customer_orders_idx")).toBe("foreign_key=customer_orders_idx");
+    expect(scrubSecrets("primary_key=1234567890")).toBe("primary_key=1234567890");
+    expect(scrubSecrets("cache_key=session_data_abc123")).toBe("cache_key=session_data_abc123");
+  });
+
+  it("does not redact public keys", () => {
+    const text = "public_key=ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC12345678";
+    expect(scrubSecrets(text)).toBe(text);
+  });
+
+  it("redacts compound secret keys like api_key, access_key, private_key", () => {
+    expect(scrubSecrets("my_api_key=abcdefghijklmnopqrstuvwxyz1234")).toContain("***REDACTED***");
+    expect(scrubSecrets("access_key=AKIA1234567890ABCDEF")).toContain("***REDACTED***");
+    expect(scrubSecrets("private_key=abcdefghijklmnopqrstuvwxyz1234")).toContain("***REDACTED***");
+  });
 });

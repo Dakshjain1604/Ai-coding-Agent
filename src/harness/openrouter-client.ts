@@ -57,6 +57,7 @@ export const OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY";
 const MODEL_SPEC_PREFIX = "openrouter/";
 const DEFAULT_LIMITS: ModelLimits = { contextWindow: 128_000, maxOutputTokens: 16_384 };
 const ERROR_DETAIL_CHARS = 1_500;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 240_000; // 4 minutes
 
 /** The run's own deadline passed while the model call was in flight; the run is over, so never retried. */
 export const DEADLINE_EXCEEDED = "deadline_exceeded";
@@ -81,6 +82,8 @@ export interface OpenRouterClientOptions {
   apiKey?: string;
   maxAttempts?: number;
   idleTimeoutMs?: number;
+  /** Maximum wall-clock milliseconds a single request may stream before aborting and retrying. Defaults to 240_000 (4 min). */
+  requestTimeoutMs?: number;
   /** Explicit limits take precedence over OpenRouter's model metadata. */
   limits?: Partial<ModelLimits>;
   /** Sent as OpenRouter's `reasoning.effort` when set; the model default otherwise. */
@@ -114,6 +117,7 @@ export class OpenRouterClient implements ChatModel {
   private readonly client: Pick<OpenAI, "chat">;
   private readonly maxAttempts: number;
   private readonly idleTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
   private readonly reasoningEffort?: ReasoningEffort;
   private readonly reasoningMaxTokens?: number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -127,6 +131,7 @@ export class OpenRouterClient implements ChatModel {
     this.id = options.spec;
     this.maxAttempts = options.maxAttempts ?? 6;
     this.idleTimeoutMs = options.idleTimeoutMs ?? 180_000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.reasoningEffort = options.reasoningEffort;
     this.reasoningMaxTokens = options.reasoningMaxTokens;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -223,6 +228,8 @@ export class OpenRouterClient implements ChatModel {
     let idleTimer: NodeJS.Timeout | undefined;
     let stalled = false;
     let deadlineExceeded = false;
+    let requestTimedOut = false;
+    const requestDeadline = Math.min(deadline, started + this.requestTimeoutMs);
     const armIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
@@ -234,12 +241,17 @@ export class OpenRouterClient implements ChatModel {
     // the wall clock on every chunk: after a resume the deadline is enforced
     // at once rather than on the next (possibly never) timer tick.
     const abortIfPastDeadline = () => {
-      if (this.now() < deadline) return false;
-      deadlineExceeded = true;
+      const now = this.now();
+      if (now < requestDeadline) return false;
+      if (now >= deadline) {
+        deadlineExceeded = true;
+      } else {
+        requestTimedOut = true;
+      }
       abort.abort();
       return true;
     };
-    const deadlineTimer = setTimeout(abortIfPastDeadline, Math.max(0, deadline - this.now()));
+    const deadlineTimer = setTimeout(abortIfPastDeadline, Math.max(0, requestDeadline - this.now()));
 
     let content = "";
     let finishReason: FinishReason = "unknown";
@@ -283,6 +295,9 @@ export class OpenRouterClient implements ChatModel {
       }
     } catch (error) {
       if (deadlineExceeded) throw deadlineError(this.now() - started);
+      if (requestTimedOut) {
+        throw new Error(`Request timed out after ${Math.round(this.requestTimeoutMs / 1000)}s: single turn model request took too long (upstream stall)`);
+      }
       if (stalled) {
         throw new Error(`Response stalled: no data for ${Math.round(this.idleTimeoutMs / 1000)}s (network timeout)`);
       }
@@ -292,6 +307,9 @@ export class OpenRouterClient implements ChatModel {
       clearTimeout(deadlineTimer);
     }
     if (deadlineExceeded) throw deadlineError(this.now() - started);
+    if (requestTimedOut) {
+      throw new Error(`Request timed out after ${Math.round(this.requestTimeoutMs / 1000)}s: single turn model request took too long (upstream stall)`);
+    }
 
     const calls = (toolCalls.finalize() ?? []).map((call, index) => ({
       id: call.id ?? `call_${started}_${index}`,

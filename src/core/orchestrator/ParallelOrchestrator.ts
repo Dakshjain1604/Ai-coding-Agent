@@ -104,8 +104,8 @@ export class ParallelOrchestrator {
       // (which always wins over the mode already pinned at construction).
       // Confirmed live: a parent run with --mode=code spawning a "test"
       // subtask would otherwise execute that subtask in "code" mode.
-      const { mode: _parentMode, ...parentMetadataWithoutMode } =
-        parentTask.metadata ?? {};
+      const parentMetadataWithoutMode = { ...(parentTask.metadata ?? {}) };
+      delete parentMetadataWithoutMode.mode;
 
       const subTask: Task = {
         id: crypto.randomUUID ? crypto.randomUUID() : `sub_${Date.now()}_${i}`,

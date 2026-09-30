@@ -67,7 +67,7 @@ export async function generateUnifiedDiff(
 
 export async function applyDiff(
   diff: FileDiff,
-  sourceDir: string,
+  _sourceDir: string,
 ): Promise<void> {
   mkdirSync(dirname(diff.sourcePath), { recursive: true });
   const outputContent = readFileSync(diff.outputPath, "utf-8");

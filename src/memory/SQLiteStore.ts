@@ -735,7 +735,7 @@ export class SQLiteStore {
     };
   }
 
-  private calculateScore(row: any, query: MemoryQuery): number {
+  private calculateScore(row: any, _query: MemoryQuery): number {
     let score = 0;
 
     // Priority score

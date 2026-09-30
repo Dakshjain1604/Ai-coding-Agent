@@ -158,10 +158,8 @@ export abstract class BaseAgent {
           if (typeof param !== "object" || param === null) {
             return [name, param];
           }
-          const { required: _required, ...rest } = param as Record<
-            string,
-            unknown
-          >;
+          const rest = { ...(param as Record<string, unknown>) };
+          delete rest.required;
           return [name, rest];
         }),
       );

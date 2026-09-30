@@ -147,7 +147,7 @@ export class OllamaCloudProvider extends BaseProvider {
     }
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(_text: string): Promise<number[]> {
     throw new ProviderError(
       "Use provider-specific embedding API",
       "ollama-cloud",
@@ -164,9 +164,9 @@ export class OllamaCloudProvider extends BaseProvider {
   }
 
   estimateCost(
-    inputTokens: number,
-    outputTokens: number,
-    model: string,
+    _inputTokens: number,
+    _outputTokens: number,
+    _model: string,
   ): number {
     return 0;
   }

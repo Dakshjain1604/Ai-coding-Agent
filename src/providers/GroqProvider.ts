@@ -224,7 +224,7 @@ export class GroqProvider extends BaseProvider {
     }
   }
 
-  async embed(text: string): Promise<number[]> {
+  async embed(_text: string): Promise<number[]> {
     throw new ProviderError("Embeddings not supported for Groq", "groq", {});
   }
 
