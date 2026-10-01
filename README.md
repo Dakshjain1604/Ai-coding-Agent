@@ -99,6 +99,16 @@ The agent has achieved perfect **Reward 1.00** pass scores across 13 diverse, hi
 - **Average Turns to Solution**: **13 turns** (ranging from 4 turns on concurrent systems to 33 turns on SMT cryptanalysis).
 - **Telemetry & Tracing**: Every execution captures complete HTTP request traces (`http.jsonl`), turn-by-turn tool inputs/outputs, model latency, token budgets, and step-level diagnostics in `bench/jobs/`.
 
+### 🧠 Key Architectural Hardening & Insights
+
+From extensive evaluation and iterative hardening on Terminal-Bench 2.0 Hard challenges, several core engineering patterns were proven essential for autonomous agent success:
+
+1. **Modern Structured Concurrency**: Handled async task scheduling via Python 3.11 `asyncio.TaskGroup` paired with bounded `asyncio.Semaphore` pools rather than legacy `asyncio.gather()`, ensuring cancellation signals under `SIGINT` cleanly shield and await active cleanups.
+2. **Causal Graph Interventions ($do(X)$)**: Adhered strictly to Pearl's $do$-calculus graph mutilation rules—severing incoming directed edges ($parents(X) \to X$) while strictly preserving outgoing causal edges ($X \to children(X)$).
+3. **SPARQL Relational Decoupling**: Avoided relational variable collision by isolating independent entity properties (e.g. EU region membership vs. minimum student count thresholds) into distinct subquery outer joins.
+4. **Deliverable Directory Sandboxing**: Zero tolerance for test artifacts or compiled executables left in deliverable directories where strict automated checkers assert exact `os.listdir()` file manifests. All scratch builds and test binaries compile into `/tmp`.
+5. **Robust Service Daemon Automation**: Configured multi-user SSH authentication (`PasswordAuthentication yes`), Git bare repositories, executable post-receive hooks, and Nginx web server permissions to ensure background daemons persist and serve cleanly across Docker container boundaries.
+
 ### 🔬 Reproducing Benchmark Runs
 
 To run the Terminal-Bench evaluation suite using Harbor:
