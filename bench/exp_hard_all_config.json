@@ -1,0 +1,50 @@
+{
+    "job_name": "exp-hard-all-30",
+    "n_concurrent_trials": 1,
+    "agents": [
+        {
+            "name": "harbor_agent.coding_agent:CodingAgent",
+            "model_name": "openrouter/~z-ai/glm-flash-latest",
+            "kwargs": {
+                "max_turns": 40
+            }
+        }
+    ],
+    "datasets": [
+        {
+            "path": "tasks",
+            "task_names": [
+                "bn-fit-modify",
+                "cancel-async-tasks",
+                "circuit-fibsqrt",
+                "configure-git-webserver",
+                "dna-assembly",
+                "extract-moves-from-video",
+                "feal-differential-cryptanalysis",
+                "feal-linear-cryptanalysis",
+                "fix-code-vulnerability",
+                "fix-ocaml-gc",
+                "gpt2-codegolf",
+                "install-windows-3.11",
+                "llm-inference-batching-scheduler",
+                "make-doom-for-mips",
+                "make-mips-interpreter",
+                "mcmc-sampling-stan",
+                "model-extraction-relu-logits",
+                "password-recovery",
+                "path-tracing",
+                "path-tracing-reverse",
+                "polyglot-rust-c",
+                "protein-assembly",
+                "regex-chess",
+                "sam-cell-seg",
+                "sparql-university",
+                "torch-pipeline-parallelism",
+                "torch-tensor-parallelism",
+                "train-fasttext",
+                "video-processing",
+                "write-compressor"
+            ]
+        }
+    ]
+}

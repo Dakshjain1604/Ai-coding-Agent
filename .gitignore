@@ -475,6 +475,8 @@ output/
 bench/tasks/
 bench/jobs/
 bench/build/
+bench/exp*_config.json
+!bench/exp_hard_all_config.json
 
 # Python bytecode from the bench harbor adapter
 bench/**/__pycache__/

@@ -224,3 +224,32 @@ not harness defects. Deliberately not patching the harness for these (that would
 exp6 (4/5: build-cython-ext 10/11 miss; kv-store-grpc, pypi-server, sqlite-db-truncate, regex-log solved)
 plus exp7 (4/7) → **8/12 solved (~67%)** across 12 distinct fresh medium tasks. This is the real signal;
 the earlier 5 easy tasks were hand-iterated and are not a fair sample.
+
+## Hard Suite Experiments (exp28–exp36) — Terminal-Bench 2.0 Hard Challenges
+
+Evaluation across the full 30-task Terminal-Bench 2.0 Hard difficulty set under Harbor:
+
+### Solved Hard Challenges Summary (Reward 1.00)
+
+| Task | Domain | Reward | Turns | Cost | Architectural Highlight |
+|---|---|---|---|---|---|
+| write-compressor | Compression | **1.00** | 21 | $0.034 | Reversed arithmetic decompressor in C, built LZ77 + interval tracker, 2,476B byte-exact |
+| feal-linear-cryptanalysis | Cryptanalysis | **1.00** | 33 | $0.076 | 4-round FEAL Feistel in Z3 SMT solver, recovered 4 seeds, decrypted 100/100 ciphertexts |
+| feal-differential-cryptanalysis | Cryptanalysis | **1.00** | 7 | $0.008 | Differential characteristic search, subkey extraction |
+| polyglot-rust-c | Compilers | **1.00** | 6 | $0.021 | Dual-syntax polyglot with arbitrary precision Fibonacci up to N=300 |
+| cancel-async-tasks | Concurrency | **1.00** | 4 | $0.0008 | Python 3.11 `asyncio.TaskGroup` + `Semaphore`, shielded SIGINT cleanup |
+| bn-fit-modify | Bayesian / Causal | **1.00** | 10 | $0.003 | DAG parameter estimation + Pearl graph mutilation $do(Y=0.0)$ |
+| sparql-university | RDF / SPARQL | **1.00** | 8 | $0.002 | Decoupled multi-relation SPARQL query with subquery outer join |
+| llm-inference-batching-scheduler | ML Systems | **1.00** | 7 | $0.012 | Dynamic request batching honoring latency budgets & KV cache limits |
+| configure-git-webserver | Sysadmin | **1.00** | 16 | $0.005 | SSH multi-user, post-receive hook deploy, Nginx web serving |
+| fix-code-vulnerability | Security | **1.00** | 12 | $0.003 | Buffer overflow remediation & secure memory bounds checking |
+| model-extraction-relu-logits | ML Security | **1.00** | 15 | $0.019 | Gradient jump clustering with cosine similarity $> 0.9999$ |
+| password-recovery | Forensics | **1.00** | 20 | $0.032 | Raw ext4 unallocated disk forensics / PBKDF2 recovery |
+| db-wal-recovery | DB Forensics | **1.00** | 18 | $0.025 | SQLite WAL frame carving and transaction reconstruction |
+
+### Key Agent Hardening Lessons
+1. **Directory Cleanliness**: Checkers for single-file deliverables assert `os.listdir(dir) == ['file.ext']`. Test binaries must compile to `/tmp`, not the deliverable directory.
+2. **Asynchronous Cancellation**: Manual `asyncio.gather(*tasks)` fails on repeated SIGINT delivery because awaiting during cleanup in `finally` gets cancelled; `asyncio.TaskGroup` properly shields and completes task cleanups.
+3. **Causal Intervention ($do(X)$)**: Interventions sever incoming directed edges ($parents(X) \to X$), while strictly preserving outgoing directed edges ($X \to children(X)$).
+4. **SPARQL Independent Relations**: When queries involve multiple independent properties of an entity (e.g. works in EU AND department has >10 students), each property must bind to distinct variables rather than conflating them into a single relation variable.
+
